@@ -1,0 +1,55 @@
+name: "Oracle Registry"
+version: "0.1.0"
+slug: "oracle_registry"
+description: >-
+  A liveness inventory for the oracle fleet, built on MQTT's own Last Will and
+  Testament. Each oracle connects with a retained will of `offline` and
+  announces itself `online`; if it crashes, the broker publishes the will on its
+  behalf, so the registry learns about a death nobody was alive to report. The
+  board shows who is up, on which host, since when, and every transition it has
+  seen. Read-only over MQTT — it never publishes to the fleet's topics.
+url: "https://github.com/laris-co/hermes-haos-addons/tree/main/oracle-registry"
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+# oven/bun has no s6-overlay, so Docker's tini becomes PID 1 and reaps children.
+init: true
+hassio_api: false
+homeassistant_api: false
+host_network: false
+# Ingress gives the sidebar page Home Assistant's own auth for free. `ports` is
+# deliberately absent: the HTTP API is reachable through ingress, or through a
+# tunnel you add on purpose — not published on the LAN by default.
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:access-point-network
+panel_title: Oracle Registry
+map:
+  - "share:ro"
+options:
+  broker: "mqtt://core-mosquitto:1883"
+  username: ""
+  password: ""
+  topic_prefix: "oracle"
+  stale_after_minutes: 15
+  retain_events: 5000
+schema:
+  # core-mosquitto with a HYPHEN. `core_mosquitto` is the add-on SLUG; Home
+  # Assistant converts underscores to hyphens for the container hostname, and
+  # the slug form does not resolve. That mistake costs a connection refusal
+  # that looks like a broker fault.
+  broker: "str"
+  username: "str?"
+  password: "password?"
+  # Subscribes to <topic_prefix>/+/lwt and <topic_prefix>/+/meta only. A bare
+  # `#` is never used — on a busy fleet broker that is gigabytes a day.
+  topic_prefix: "str?"
+  # An oracle that is `online` but silent for longer than this is shown as
+  # stale. LWT cannot distinguish a wedged process from a healthy quiet one;
+  # this is the difference between "the broker still holds its session" and
+  # "we have actually heard from it".
+  stale_after_minutes: "int(1,1440)?"
+  # Transition history cap. Oldest rows are trimmed past this.
+  retain_events: "int(100,100000)?"

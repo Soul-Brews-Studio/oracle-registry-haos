@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark light" />
+<title>Oracle Registry</title>
+<style>
+  /* No build step and no CDN. A sibling add-on in this repo learned that a
+     committed dist/ goes stale against its source without saying so; what you
+     read here is what runs. */
+  :root {
+    --bg: #0f1115; --panel: #161922; --line: #242936; --ink: #e6e9ef;
+    --muted: #8b93a7; --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --up: #3fb950; --down: #f85149; --stale: #d29922; --unknown: #6e7681; --accent: #58a6ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6ec; --ink:#1b1f27; --muted:#5b6478; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,sans-serif; }
+  header { padding:20px 24px 0; }
+  h1 { margin:0 0 2px; font-size:19px; font-weight:650; letter-spacing:-.01em; }
+  .sub { color:var(--muted); font-size:13px; }
+  .bar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; padding:16px 24px; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:9px 14px; }
+  .stat b { font-size:19px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--muted); font-size:12px; display:block; }
+  main { padding:0 24px 32px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel);
+          border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th,td { padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); }
+  th { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:600; }
+  tr:last-child td { border-bottom:0; }
+  .name { font-family:var(--mono); font-weight:600; }
+  .pill { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600;
+          padding:3px 9px; border-radius:999px; border:1px solid transparent; }
+  .dot { width:7px; height:7px; border-radius:50%; }
+  .online  { color:var(--up);      background:color-mix(in srgb,var(--up) 12%,transparent);      border-color:color-mix(in srgb,var(--up) 32%,transparent); }
+  .offline { color:var(--down);    background:color-mix(in srgb,var(--down) 12%,transparent);    border-color:color-mix(in srgb,var(--down) 32%,transparent); }
+  .stale   { color:var(--stale);   background:color-mix(in srgb,var(--stale) 12%,transparent);   border-color:color-mix(in srgb,var(--stale) 32%,transparent); }
+  .unknown { color:var(--unknown); background:color-mix(in srgb,var(--unknown) 12%,transparent); border-color:color-mix(in srgb,var(--unknown) 32%,transparent); }
+  .dim { color:var(--muted); font-size:13px; }
+  .mono { font-family:var(--mono); font-size:12.5px; }
+  .empty { padding:44px 24px; text-align:center; color:var(--muted); }
+  .empty code { font-family:var(--mono); background:var(--panel); border:1px solid var(--line);
+                padding:2px 6px; border-radius:5px; font-size:12.5px; }
+  button { font:inherit; font-size:13px; background:var(--panel); color:var(--ink);
+           border:1px solid var(--line); border-radius:8px; padding:7px 13px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .warn { background:color-mix(in srgb,var(--down) 10%,transparent);
+          border:1px solid color-mix(in srgb,var(--down) 35%,transparent);
+          border-radius:9px; padding:11px 14px; margin:0 24px 14px; font-size:13px; }
+  details { margin:20px 0 0; }
+  summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  .key { font-family:var(--mono); font-size:12px; word-break:break-all;
+         background:var(--bg); border:1px solid var(--line); border-radius:7px; padding:9px; margin:8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Oracle Registry</h1>
+  <div class="sub">Liveness from MQTT's Last Will and Testament — the broker reports a death nobody was alive to report.</div>
+</header>
+
+<div id="alert"></div>
+
+<div class="bar">
+  <div class="stat"><b id="n-online">–</b><span>online</span></div>
+  <div class="stat"><b id="n-stale">–</b><span>stale</span></div>
+  <div class="stat"><b id="n-offline">–</b><span>offline</span></div>
+  <div class="stat"><b id="n-total">–</b><span>known</span></div>
+  <button id="refresh">Refresh</button>
+  <span class="dim" id="updated"></span>
+</div>
+
+<main>
+  <div id="table"></div>
+
+  <details>
+    <summary>API keys — for reading this registry from outside Home Assistant</summary>
+    <p class="dim">The sidebar is authenticated by Home Assistant, so it needs no key. A key is for
+      anything else: <code class="mono">Authorization: Bearer &lt;key&gt;</code>. Keys can only be minted
+      here, never by another key.</p>
+    <button id="mint">Mint a key</button>
+    <div id="keyout"></div>
+    <div id="keys"></div>
+  </details>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// Relative fetches so the same page works under the ingress path and directly.
+const api = (p, o) => fetch('.' + p, o).then(async r => {
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.message || body.error || r.status);
+  return body;
+});
+
+const ago = (iso) => {
+  if (!iso) return '—';
+  const s = Math.floor((Date.now() - Date.parse(iso)) / 1000);
+  if (!Number.isFinite(s)) return '—';
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+};
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function pill(o) {
+  const k = o.stale ? 'stale' : (o.state === 'online' ? 'online' : o.state === 'offline' ? 'offline' : 'unknown');
+  const label = o.stale ? 'stale' : o.state;
+  return `<span class="pill ${k}"><span class="dot" style="background:currentColor"></span>${label}</span>`;
+}
+
+async function load() {
+  try {
+    const health = await api('/api/health');
+    $('alert').innerHTML = health.mqtt && health.mqtt.connected
+      ? ''
+      : `<div class="warn"><b>Not connected to the broker.</b> ${esc((health.mqtt && health.mqtt.error) || 'connecting…')}
+         — the list below is the last known state, not live.</div>`;
+
+    const d = await api('/api/oracles');
+    $('n-online').textContent = d.online;
+    $('n-stale').textContent = d.stale;
+    $('n-offline').textContent = d.offline;
+    $('n-total').textContent = d.count;
+    $('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+
+    if (!d.count) {
+      $('table').innerHTML = `<div class="empty">
+        <p>No oracle has announced itself yet.</p>
+        <p>An oracle registers by connecting with a retained will and publishing <code>online</code>:</p>
+        <p><code>mosquitto_pub -t 'oracle/&lt;name&gt;/lwt' -m online -r -q 1 \\<br>
+           &nbsp;&nbsp;--will-topic 'oracle/&lt;name&gt;/lwt' --will-payload offline --will-retain</code></p>
+      </div>`;
+      return;
+    }
+
+    $('table').innerHTML = `<table><thead><tr>
+        <th>Oracle</th><th>State</th><th>Host</th><th>Last seen</th>
+        <th>Online since</th><th>Transitions</th>
+      </tr></thead><tbody>` +
+      d.oracles.map(o => `<tr>
+        <td class="name">${esc(o.name)}</td>
+        <td>${pill(o)}</td>
+        <td class="mono">${esc(o.host || '—')}</td>
+        <td class="dim">${ago(o.lastSeen)}</td>
+        <td class="dim">${o.state === 'online' ? ago(o.lastOnline) : '—'}</td>
+        <td class="dim">${o.transitions}</td>
+      </tr>`).join('') + `</tbody></table>`;
+  } catch (e) {
+    $('table').innerHTML = `<div class="empty">Could not load: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadKeys() {
+  try {
+    const d = await api('/api/keys');
+    $('keys').innerHTML = d.keys.length
+      ? '<table><thead><tr><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody>' +
+        d.keys.map(k => `<tr><td>${esc(k.label)}</td><td class="dim">${esc(k.created_at.slice(0,10))}</td>
+          <td class="dim">${k.last_used ? ago(k.last_used) : 'never'}</td>
+          <td><button data-revoke="${esc(k.id)}">Revoke</button></td></tr>`).join('') + '</tbody></table>'
+      : '<p class="dim">No keys yet.</p>';
+    $('keys').querySelectorAll('[data-revoke]').forEach(b => b.onclick = async () => {
+      await api('/api/keys/' + b.dataset.revoke, { method: 'DELETE' });
+      loadKeys();
+    });
+  } catch (e) { $('keys').innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
+
+$('refresh').onclick = load;
+$('mint').onclick = async () => {
+  const label = prompt('What is this key for?', 'fleet dashboard');
+  if (label === null) return;
+  const k = await api('/api/keys', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label }),
+  });
+  $('keyout').innerHTML = `<div class="key">${esc(k.key)}</div>
+    <p class="dim">Copy it now — it is not shown again.</p>`;
+  loadKeys();
+};
+
+load(); loadKeys();
+setInterval(load, 10000);
+</script>
+</body>
+</html>
