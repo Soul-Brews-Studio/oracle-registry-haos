@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "oracle-channel": {
+      "command": "bun",
+      "args": [
+        "run",
+        "--env-file=/dev/null",
+        "--cwd",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "--silent",
+        "start"
+      ]
+    }
+  }
+}

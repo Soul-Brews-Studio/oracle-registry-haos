@@ -251,9 +251,10 @@ function startMqtt() {
       }
       try {
         const s = JSON.parse(text);
-        // Only the mqtt-channel contract counts. A shared broker can carry
+        // Only known channel implementations count. A shared broker can carry
         // anything on */status; unknown shapes are not evidence of a channel.
-        if (s && s.client === "mqtt-channel" && typeof s.online === "boolean") {
+        const CHANNEL_CLIENTS = ["oracle-channel", "mqtt-channel"];
+        if (s && CHANNEL_CLIENTS.includes(s.client) && typeof s.online === "boolean") {
           q.upsertChannel.run({ $name: name, $online: s.online ? 1 : 0, $now: nowIso() });
         }
       } catch {

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "oracle-registry",
+  "description": "The Oracle Registry's own plugins — the channel client ships from the same repo as the add-on that dispatches to it, so contract and client cannot drift.",
+  "owner": {
+    "name": "Soul Brews Studio",
+    "url": "https://github.com/Soul-Brews-Studio"
+  },
+  "plugins": [
+    {
+      "name": "oracle-channel",
+      "description": "Registry dispatch arrives in this Claude Code session as a channel message; replies go back over MQTT; presence registers itself via a retained LWT.",
+      "category": "channel",
+      "source": "./channel",
+      "homepage": "https://github.com/Soul-Brews-Studio/oracle-registry-haos/tree/main/channel"
+    }
+  ]
+}

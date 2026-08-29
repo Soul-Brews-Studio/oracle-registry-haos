@@ -1,0 +1,17 @@
+{
+  "name": "oracle-channel",
+  "description": "The client half of the Oracle Registry's dispatch contract — messages published to <name>/<room>/in arrive in this Claude Code session; replies go back on <name>/<room>/out; a retained LWT-backed <name>/status registers the session with the registry automatically.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Soul Brews Studio",
+    "url": "https://github.com/Soul-Brews-Studio"
+  },
+  "homepage": "https://github.com/Soul-Brews-Studio/oracle-registry-haos/tree/main/channel",
+  "license": "Apache-2.0",
+  "channels": [
+    {
+      "server": "oracle-channel"
+    }
+  ],
+  "keywords": ["mqtt", "channel", "mcp", "oracle-registry", "lwt"]
+}
