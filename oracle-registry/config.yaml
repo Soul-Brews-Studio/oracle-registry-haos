@@ -1,5 +1,5 @@
 name: "Oracle Registry"
-version: "0.1.0"
+version: "0.2.0"
 slug: "oracle_registry"
 description: >-
   A liveness inventory for the oracle fleet, built on MQTT's own Last Will and
@@ -7,7 +7,8 @@ description: >-
   announces itself `online`; if it crashes, the broker publishes the will on its
   behalf, so the registry learns about a death nobody was alive to report. The
   board shows who is up, on which host, since when, and every transition it has
-  seen. Read-only over MQTT — it never publishes to the fleet's topics.
+  seen. Read-only over MQTT by default; dispatching messages to channel-capable
+  members is opt-in behind a separate broker login.
 url: "https://github.com/laris-co/hermes-haos-addons/tree/main/oracle-registry"
 arch:
   - amd64
@@ -35,6 +36,8 @@ options:
   topic_prefix: "oracle"
   stale_after_minutes: 15
   retain_events: 5000
+  dispatch_username: ""
+  dispatch_password: ""
 schema:
   # core-mosquitto with a HYPHEN. `core_mosquitto` is the add-on SLUG; Home
   # Assistant converts underscores to hyphens for the container hostname, and
@@ -53,3 +56,10 @@ schema:
   stale_after_minutes: "int(1,1440)?"
   # Transition history cap. Oldest rows are trimmed past this.
   retain_events: "int(100,100000)?"
+  # A SECOND broker login, used only for publishing to <name>/<room>/in.
+  # Leave both empty and the add-on cannot write to the broker at all — the
+  # watcher connection has no publish path. Reusing the read login here would
+  # silently turn the read credential into a write credential; a distinct
+  # mosquitto account keeps rotations per-service.
+  dispatch_username: "str?"
+  dispatch_password: "password?"

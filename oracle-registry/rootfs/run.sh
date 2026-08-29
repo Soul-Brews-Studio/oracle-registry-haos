@@ -16,7 +16,13 @@ console.log(`export OR_PASS=${q(o.password)}`);
 console.log(`export OR_PREFIX=${q(o.topic_prefix ?? "oracle")}`);
 console.log(`export OR_STALE_MIN=${q(o.stale_after_minutes ?? 15)}`);
 console.log(`export OR_RETAIN_EVENTS=${q(o.retain_events ?? 5000)}`);
+console.log(`export OR_DISPATCH_USER=${q(o.dispatch_username)}`);
+console.log(`export OR_DISPATCH_PASS=${q(o.dispatch_password)}`);
 ')"
+
+# Single source for the version the health endpoint reports — config.yaml is
+# not readable from inside the container, and a hardcoded fallback drifts.
+export OR_VERSION="0.2.0"
 
 if [ -z "${OR_BROKER:-}" ]; then
     echo "oracle-registry: no broker set — open Configuration and set one." >&2
@@ -25,8 +31,8 @@ if [ -z "${OR_BROKER:-}" ]; then
     exit 1
 fi
 
-# Say where we are pointing and as whom. Never the password: anything that
+# Say where we are pointing and as whom. Never the passwords: anything that
 # prints a command line or a config value is part of the secret's surface.
-echo "oracle-registry: broker=${OR_BROKER} user=${OR_USER:-<anonymous>} prefix=${OR_PREFIX}"
+echo "oracle-registry: broker=${OR_BROKER} user=${OR_USER:-<anonymous>} prefix=${OR_PREFIX} dispatch=${OR_DISPATCH_USER:-<disabled>}"
 
 exec bun /app/server.ts

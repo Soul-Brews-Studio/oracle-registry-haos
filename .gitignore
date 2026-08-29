@@ -4,3 +4,4 @@ bun.lock
 
 # Local Oracle vault — never commit or push session memory.
 ψ/
+oracle-registry/rootfs/web/vendor/

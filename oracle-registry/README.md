@@ -6,8 +6,13 @@ Testament** — the one mechanism that reports a death nobody was alive to repor
 Each member connects declaring a retained will of `offline`, then publishes a
 retained `online`. If it exits cleanly it says so itself. If it is killed, loses
 power, or drops off the network, **the broker publishes the will on its behalf**.
-This add-on subscribes to that and keeps the score. It never infers liveness and
-it never publishes to your fleet's topics.
+This add-on subscribes to that and keeps the score. It never infers liveness.
+
+**Read-only by default.** The watcher connection has no publish path — that is
+a property of the code, not a configuration. Dispatch (sending messages into a
+member's channel) is opt-in: it only exists when a *separate* broker login is
+configured, and it runs on its own connection. With `dispatch_username` unset,
+this add-on cannot write to your broker at all.
 
 ## The contract
 
@@ -73,15 +78,40 @@ carries no "this was a will" flag to a subscriber. So the registry records
 need that distinction, have members publish a distinct payload on clean
 shutdown and set the will to a different one.
 
+## Channels: the naming convention
+
+Members running the [arra-mqtt-channel](https://github.com/nat-build-with-oracle/arra-mqtt-channel)
+Claude Code plugin are discoverable and messageable with **zero registration
+steps** — the channel's own MQTT connection is its registration. The one rule:
+
+> **The channel's `MQTT_TOPIC_PREFIX` must equal the member's registry name.**
+
+The registry then watches these topics (all outside the registry's own prefix):
+
+| topic | direction | payload |
+|---|---|---|
+| `<name>/status` *(retained, LWT-backed)* | channel → registry | `{"online":bool,"client":"mqtt-channel","ts"}` |
+| `<name>/<room>/in` | registry → channel | `{"text","user","id"}` |
+| `<name>/<room>/out` | channel → registry | `{"type":"msg","from":"assistant","text","ts",...}` |
+
+A member with a status topic but no `lwt` shows as a channel-only row with
+state `unknown`. A decommissioned channel leaves its retained `<name>/status`
+on the broker — clear it there (`-r -n`) or it reappears, same as `lwt`.
+
+Anything published to `<name>/<room>/in` arrives **inside a Claude session as
+a message**. That is the point — and the reason dispatch is treated as a write
+credential everywhere below.
+
 ## Configuration
 
 | option | default | notes |
 |---|---|---|
 | `broker` | `mqtt://core-mosquitto:1883` | **hyphen.** `core_mosquitto` is the add-on *slug*; Home Assistant converts underscores to hyphens for the container hostname, and the slug form does not resolve |
 | `username` / `password` | empty | the Mosquitto add-on ships with `logins: []` and anonymous disabled — a login must exist before anything can connect |
-| `topic_prefix` | `oracle` | subscribes to `<prefix>/+/lwt` and `<prefix>/+/meta` only, never `#` |
+| `topic_prefix` | `oracle` | subscribes to `<prefix>/+/lwt`, `<prefix>/+/meta`, `+/status` and `+/+/out` only, never `#` |
 | `stale_after_minutes` | `15` | silence past this marks an `online` member stale |
 | `retain_events` | `5000` | transition-history cap; oldest trimmed |
+| `dispatch_username` / `dispatch_password` | empty | a **separate** mosquitto login for the write path. Unset = dispatch off, add-on is a pure watcher. Use a distinct account (e.g. `dispatch`) — never reuse the read login, and mint it fresh rather than recycling an exposed credential. For defense in depth, give it a mosquitto ACL of write-only on `+/+/in` |
 
 ## API
 
@@ -92,12 +122,14 @@ access that survives revoking it.
 
 | route | |
 |---|---|
-| `GET /api/health` | open, unauthenticated — broker connection state and counts |
-| `GET /api/oracles` | the inventory |
+| `GET /api/health` | open, unauthenticated — broker connection state, dispatch state, counts |
+| `GET /api/oracles` | the inventory (each row carries `channel: true/false/null`) |
 | `GET /api/oracles/:name` | one member plus its last 100 transitions |
-| `DELETE /api/oracles/:name` | forget locally *(the retained topic lives in the broker — clear it there too, or it reappears)* |
+| `POST /api/oracles/:name/send` | dispatch `{room?, text, user?}` to `<name>/<room>/in`. Needs a dispatch-capable caller: the sidebar, or a key minted with dispatch permission. `503` dispatch off/disconnected · `403` key lacks permission · `400` bad name/room/text · `429` over 30/min. Every send is logged |
+| `GET /api/oracles/:name/replies?since=` | recent channel replies (in-memory, last 200 fleet-wide — a live view, not a transcript) |
+| `DELETE /api/oracles/:name` | forget locally *(the retained topics live in the broker — clear `lwt` and `status` there too, or it reappears)* |
 | `GET /api/events?limit=` | the transition log |
-| `GET`/`POST /api/keys`, `DELETE /api/keys/:id` | key management, sidebar only |
+| `GET`/`POST /api/keys`, `DELETE /api/keys/:id` | key management, sidebar only. `can_dispatch` is set at mint time and never changeable afterwards — a leaked key cannot upgrade itself |
 
 ## Install
 

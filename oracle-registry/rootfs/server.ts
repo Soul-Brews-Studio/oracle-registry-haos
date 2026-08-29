@@ -33,6 +33,14 @@ const PREFIX = (process.env.OR_PREFIX ?? "oracle").replace(/\/+$/, "");
 const STALE_MIN = Number(process.env.OR_STALE_MIN ?? 15);
 const RETAIN_EVENTS = Number(process.env.OR_RETAIN_EVENTS ?? 5000);
 
+// Dispatch is opt-in and carries its OWN broker login. Leaving these unset
+// keeps the add-on exactly what 0.1.0 promised: a watcher with no publish
+// path. Reusing the read login here would silently turn the read credential
+// into a write credential — a separate account keeps rotations per-service.
+const DISPATCH_USER = process.env.OR_DISPATCH_USER ?? "";
+const DISPATCH_PASS = process.env.OR_DISPATCH_PASS ?? "";
+const DISPATCH_ENABLED = Boolean(BROKER && DISPATCH_USER && DISPATCH_PASS);
+
 const nowIso = () => new Date().toISOString();
 
 // ── database ────────────────────────────────────────────────────────────────
@@ -73,7 +81,32 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at TEXT NOT NULL,
   last_used  TEXT
 );
+
+-- Every outbound message, append-only. Dispatch is the one thing this service
+-- does that can reach INTO a Claude session, so each send keeps an audit row.
+CREATE TABLE IF NOT EXISTS dispatches (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  room TEXT NOT NULL,
+  text TEXT NOT NULL,
+  via  TEXT NOT NULL,                    -- api-key id | 'ingress'
+  at   TEXT NOT NULL
+);
 `);
+
+// /data/registry.db outlives add-on updates, so CREATE TABLE IF NOT EXISTS
+// alone cannot evolve existing tables — a 0.1.0 database arriving here needs
+// the new columns added, and a second boot must be a no-op.
+const cols = (t: string) =>
+  new Set(db.query(`PRAGMA table_info(${t})`).all().map((c: any) => c.name));
+if (!cols("api_keys").has("can_dispatch")) {
+  db.exec("ALTER TABLE api_keys ADD COLUMN can_dispatch INTEGER NOT NULL DEFAULT 0");
+}
+if (!cols("oracles").has("channel_online")) {
+  // null = never saw a status topic; 0/1 = the channel's own retained LWT.
+  db.exec("ALTER TABLE oracles ADD COLUMN channel_online INTEGER");
+  db.exec("ALTER TABLE oracles ADD COLUMN channel_ts TEXT");
+}
 
 const q = {
   upsertState: db.query(`
@@ -99,6 +132,17 @@ const q = {
       meta_json = $meta,
       last_seen = $now
   `),
+  // A channel-only member (status seen, lwt never) gets a row with
+  // state 'unknown' — same trick as upsertMeta, so it shows up in the
+  // inventory instead of being invisible until it adopts the lwt contract.
+  upsertChannel: db.query(`
+    INSERT INTO oracles (name, state, first_seen, last_seen, transitions, channel_online, channel_ts)
+    VALUES ($name, 'unknown', $now, $now, 0, $online, $now)
+    ON CONFLICT(name) DO UPDATE SET
+      channel_online = $online,
+      channel_ts     = $now,
+      last_seen      = $now
+  `),
   priorState: db.query<{ state: string }, [string]>(`SELECT state FROM oracles WHERE name = ?`),
   addEvent: db.query(`INSERT INTO events (name, state, at, source) VALUES ($name, $state, $at, $source)`),
   trimEvents: db.query(`
@@ -109,12 +153,16 @@ const q = {
   one: db.query(`SELECT * FROM oracles WHERE name = ?`),
   events: db.query(`SELECT * FROM events ORDER BY id DESC LIMIT $limit`),
   eventsFor: db.query(`SELECT * FROM events WHERE name = $name ORDER BY id DESC LIMIT $limit`),
-  keys: db.query(`SELECT id, label, created_at, last_used FROM api_keys ORDER BY created_at`),
+  keys: db.query(`SELECT id, label, created_at, last_used, can_dispatch FROM api_keys ORDER BY created_at`),
   keyByValue: db.query<{ id: string }, [string]>(`SELECT id FROM api_keys WHERE key = ?`),
-  allKeyValues: db.query<{ id: string; key: string }, []>(`SELECT id, key FROM api_keys`),
+  allKeyValues: db.query<{ id: string; key: string; can_dispatch: number }, []>(`SELECT id, key, can_dispatch FROM api_keys`),
   touchKey: db.query(`UPDATE api_keys SET last_used = $at WHERE id = $id`),
-  mintKey: db.query(`INSERT INTO api_keys (id, label, key, created_at) VALUES ($id, $label, $key, $at)`),
+  mintKey: db.query(`INSERT INTO api_keys (id, label, key, created_at, can_dispatch) VALUES ($id, $label, $key, $at, $can)`),
   revokeKey: db.query(`DELETE FROM api_keys WHERE id = ?`),
+  addDispatch: db.query(`INSERT INTO dispatches (name, room, text, via, at) VALUES ($name, $room, $text, $via, $at)`),
+  trimDispatches: db.query(`
+    DELETE FROM dispatches WHERE id NOT IN (SELECT id FROM dispatches ORDER BY id DESC LIMIT 2000)
+  `),
 };
 
 // ── ingestion ───────────────────────────────────────────────────────────────
@@ -146,6 +194,17 @@ let mqttStatus: { connected: boolean; error: string | null; since: string | null
   since: null,
 };
 
+// Recent channel replies, memory only. Message traffic is the channel's own
+// business — the registry keeps just enough to show "it answered" in the UI,
+// not a durable transcript. 200 entries, monotonic seq for cheap polling.
+type Reply = { seq: number; name: string; room: string; msg: unknown; at: string };
+const replies: Reply[] = [];
+let replySeq = 0;
+function pushReply(name: string, room: string, msg: unknown) {
+  replies.push({ seq: ++replySeq, name, room, msg, at: nowIso() });
+  if (replies.length > 200) replies.shift();
+}
+
 function startMqtt() {
   if (!BROKER) {
     mqttStatus.error = "no broker configured";
@@ -164,9 +223,12 @@ function startMqtt() {
 
   client.on("connect", () => {
     mqttStatus = { connected: true, error: null, since: nowIso() };
-    // Exactly two patterns. Never `#` — on a fleet broker that is ~109 GB/day,
+    // Exact patterns only. Never `#` — on a fleet broker that is ~109 GB/day,
     // a lesson this fleet paid for once already.
-    const topics = [`${PREFIX}/+/lwt`, `${PREFIX}/+/meta`];
+    //   +/status  — the arra-mqtt-channel plugin's retained LWT-backed
+    //               presence; the channel's own connection IS its registration.
+    //   +/+/out   — channel replies, depth-3 exactly so out/img stays out.
+    const topics = [`${PREFIX}/+/lwt`, `${PREFIX}/+/meta`, `+/status`, `+/+/out`];
     client.subscribe(topics, { qos: 1 }, (err) => {
       if (err) console.error("[registry] subscribe failed:", err.message);
       else console.log(`[registry] connected, watching ${topics.join(" and ")}`);
@@ -175,6 +237,40 @@ function startMqtt() {
 
   client.on("message", (topic, payload) => {
     const text = payload.toString().trim();
+    const parts = topic.split("/");
+
+    // <name>/status — the channel plugin's presence. Skip the registry's own
+    // prefix: a stray retained "oracle/status" would otherwise mint a phantom
+    // member literally named after the prefix.
+    if (parts.length === 2 && parts[1] === "status" && parts[0] && parts[0] !== PREFIX) {
+      const name = parts[0];
+      if (text === "") {
+        // Retain cleared — the channel was decommissioned on purpose.
+        q.upsertChannel.run({ $name: name, $online: null, $now: nowIso() });
+        return;
+      }
+      try {
+        const s = JSON.parse(text);
+        // Only the mqtt-channel contract counts. A shared broker can carry
+        // anything on */status; unknown shapes are not evidence of a channel.
+        if (s && s.client === "mqtt-channel" && typeof s.online === "boolean") {
+          q.upsertChannel.run({ $name: name, $online: s.online ? 1 : 0, $now: nowIso() });
+        }
+      } catch {
+        /* not the channel contract — ignore */
+      }
+      return;
+    }
+
+    // <name>/<room>/out — channel replies into the ring buffer. Tolerate any
+    // payload shape: an unparseable reply is still worth showing raw.
+    if (parts.length === 3 && parts[2] === "out" && parts[0] !== PREFIX) {
+      if (text === "") return;
+      let msg: unknown;
+      try { msg = JSON.parse(text); } catch { msg = { text }; }
+      pushReply(parts[0], parts[1], msg);
+      return;
+    }
 
     const lwtName = nameFrom(topic, "lwt");
     if (lwtName) {
@@ -219,6 +315,65 @@ function startMqtt() {
   });
 }
 
+// ── dispatch (write path) ───────────────────────────────────────────────────
+
+/**
+ * The watcher connection above never calls publish — that invariant is the
+ * real read-only guarantee, and it survives even a broker whose ACLs grant
+ * both logins everything. Dispatch runs on its OWN connection with its own
+ * credential, subscribes to nothing, and exists only when configured.
+ */
+let dispatchStatus: { connected: boolean; error: string | null; since: string | null } = {
+  connected: false,
+  error: null,
+  since: null,
+};
+let dispatchClient: mqtt.MqttClient | null = null;
+
+function startDispatchMqtt() {
+  if (!DISPATCH_ENABLED) return;
+  const client = mqtt.connect(BROKER, {
+    username: DISPATCH_USER,
+    password: DISPATCH_PASS,
+    reconnectPeriod: 5000,
+    clientId: `oracle-registry-dispatch-${randomBytes(4).toString("hex")}`,
+  });
+  client.on("connect", () => {
+    dispatchStatus = { connected: true, error: null, since: nowIso() };
+    console.log("[registry] dispatch connected");
+  });
+  client.on("error", (err) => {
+    dispatchStatus.connected = false;
+    dispatchStatus.error = err.message;
+    console.error("[registry] dispatch mqtt error:", err.message);
+  });
+  client.on("close", () => {
+    dispatchStatus.connected = false;
+  });
+  dispatchClient = client;
+}
+
+// 30 sends per minute per caller. A leaked dispatch key is a prompt-injection
+// channel into every oracle on the fleet; the limiter turns "flood" into
+// "trickle" while the key gets revoked.
+const rateBuckets = new Map<string, number[]>();
+function rateLimited(who: string): boolean {
+  const now = Date.now();
+  const bucket = (rateBuckets.get(who) ?? []).filter((t) => now - t < 60_000);
+  if (bucket.length >= 30) {
+    rateBuckets.set(who, bucket);
+    return true;
+  }
+  bucket.push(now);
+  rateBuckets.set(who, bucket);
+  return false;
+}
+
+// The one security-critical line of the feature: name and room become MQTT
+// topic segments, and decodeURIComponent happily yields "a/b", "#" or "+".
+// Anything outside this charset is refused before topic construction.
+const TOPIC_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
+
 // ── auth ────────────────────────────────────────────────────────────────────
 
 /**
@@ -237,23 +392,30 @@ function keyFromRequest(req: Request): string | null {
 }
 
 /** Constant-time compare against every stored key, so a timing signal cannot leak one. */
-function validKey(candidate: string): string | null {
+function validKey(candidate: string): { id: string; canDispatch: boolean } | null {
   const buf = Buffer.from(candidate);
   for (const row of q.allKeyValues.all()) {
     const stored = Buffer.from(row.key);
-    if (stored.length === buf.length && timingSafeEqual(stored, buf)) return row.id;
+    if (stored.length === buf.length && timingSafeEqual(stored, buf)) {
+      return { id: row.id, canDispatch: row.can_dispatch === 1 };
+    }
   }
   return null;
 }
 
-function authorize(req: Request): { ok: true; via: string } | { ok: false } {
-  if (viaIngress(req)) return { ok: true, via: "ingress" };
+type Auth =
+  | { ok: true; via: "ingress"; keyId: null; canDispatch: true }
+  | { ok: true; via: "api-key"; keyId: string; canDispatch: boolean }
+  | { ok: false };
+
+function authorize(req: Request): Auth {
+  if (viaIngress(req)) return { ok: true, via: "ingress", keyId: null, canDispatch: true };
   const candidate = keyFromRequest(req);
   if (!candidate) return { ok: false };
-  const id = validKey(candidate);
-  if (!id) return { ok: false };
-  q.touchKey.run({ $at: nowIso(), $id: id });
-  return { ok: true, via: "api-key" };
+  const found = validKey(candidate);
+  if (!found) return { ok: false };
+  q.touchKey.run({ $at: nowIso(), $id: found.id });
+  return { ok: true, via: "api-key", keyId: found.id, canDispatch: found.canDispatch };
 }
 
 // ── shaping ─────────────────────────────────────────────────────────────────
@@ -280,6 +442,10 @@ function decorate(row: any) {
     lastOnline: row.last_online ?? null,
     lastOffline: row.last_offline ?? null,
     transitions: row.transitions,
+    // null = never seen a channel status; true/false = the channel plugin's
+    // own retained LWT on <name>/status.
+    channel: row.channel_online == null ? null : row.channel_online === 1,
+    channelTs: row.channel_ts ?? null,
   };
 }
 
@@ -311,8 +477,9 @@ Bun.serve({
       return json({
         status: "ok",
         service: "oracle-registry",
-        version: process.env.OR_VERSION ?? "0.1.0",
+        version: process.env.OR_VERSION ?? "0.2.0",
         mqtt: mqttStatus,
+        dispatch: { enabled: DISPATCH_ENABLED, connected: dispatchStatus.connected },
         prefix: PREFIX,
         counts: {
           oracles: (q.all.all() as any[]).length,
@@ -333,6 +500,51 @@ Bun.serve({
           stale: rows.filter((r) => r.stale).length,
           offline: rows.filter((r) => r.state === "offline").length,
           oracles: rows,
+        });
+      }
+
+      // Dispatch: publish into a channel-capable member's inbox topic.
+      const sendMatch = path.match(/^\/api\/oracles\/([^/]+)\/send$/);
+      if (sendMatch && req.method === "POST") {
+        if (!DISPATCH_ENABLED) {
+          return json({ error: "dispatch_disabled", message: "Set dispatch_username and dispatch_password in Configuration." }, 503);
+        }
+        if (!dispatchStatus.connected || !dispatchClient) {
+          return json({ error: "dispatch_disconnected", message: "Dispatch connection to the broker is down." }, 503);
+        }
+        if (auth.via === "api-key" && !auth.canDispatch) {
+          return json({ error: "forbidden", message: "This key cannot dispatch. Mint one with dispatch permission from the sidebar." }, 403);
+        }
+        const name = decodeURIComponent(sendMatch[1]);
+        const body = (await req.json().catch(() => ({}))) as any;
+        const room = String(body.room ?? "main");
+        const msgText = typeof body.text === "string" ? body.text : "";
+        if (!TOPIC_SEGMENT.test(name) || !TOPIC_SEGMENT.test(room)) {
+          return json({ error: "bad_request", message: "name and room must match [A-Za-z0-9_-]{1,64}" }, 400);
+        }
+        if (!msgText || msgText.length > 8192) {
+          return json({ error: "bad_request", message: "text must be non-empty and at most 8192 chars" }, 400);
+        }
+        if (!q.one.get(name)) return json({ error: "not_found" }, 404);
+        const who = auth.via === "api-key" ? auth.keyId : "ingress";
+        if (rateLimited(who)) return json({ error: "rate_limited", message: "At most 30 dispatches per minute." }, 429);
+
+        const id = randomBytes(8).toString("hex");
+        const user = typeof body.user === "string" && body.user ? body.user.slice(0, 64) : "registry";
+        dispatchClient.publish(`${name}/${room}/in`, JSON.stringify({ text: msgText, user, id }), { qos: 1 });
+        q.addDispatch.run({ $name: name, $room: room, $text: msgText.slice(0, 2048), $via: who, $at: nowIso() });
+        q.trimDispatches.run();
+        return json({ sent: true, id, topic: `${name}/${room}/in` });
+      }
+
+      // Recent replies from a member's channel, out of the in-memory ring.
+      const repliesMatch = path.match(/^\/api\/oracles\/([^/]+)\/replies$/);
+      if (repliesMatch && req.method === "GET") {
+        const name = decodeURIComponent(repliesMatch[1]);
+        const since = Number(url.searchParams.get("since") ?? 0);
+        return json({
+          replies: replies.filter((r) => r.name === name && r.seq > since),
+          latest: replySeq,
         });
       }
 
@@ -372,9 +584,12 @@ Bun.serve({
           const label = String(body.label ?? "").trim() || "unnamed";
           const key = `ork_${randomBytes(24).toString("hex")}`;
           const id = randomBytes(8).toString("hex");
-          q.mintKey.run({ $id: id, $label: label, $key: key, $at: nowIso() });
+          // Dispatch permission is decided at mint time only — and minting is
+          // already ingress-only, so a leaked key can never upgrade itself.
+          const can = body.can_dispatch === true ? 1 : 0;
+          q.mintKey.run({ $id: id, $label: label, $key: key, $at: nowIso(), $can: can });
           // The only time the key is ever returned. It is not recoverable later.
-          return json({ id, label, key, note: "Copy it now — this is the only time it is shown." }, 201);
+          return json({ id, label, key, can_dispatch: can === 1, note: "Copy it now — this is the only time it is shown." }, 201);
         }
       }
 
@@ -394,5 +609,6 @@ Bun.serve({
   },
 });
 
-console.log(`[registry] listening on 0.0.0.0:${PORT}, prefix "${PREFIX}", db ${DB_PATH}`);
+console.log(`[registry] listening on 0.0.0.0:${PORT}, prefix "${PREFIX}", db ${DB_PATH}, dispatch ${DISPATCH_ENABLED ? "enabled" : "disabled"}`);
 startMqtt();
+startDispatchMqtt();

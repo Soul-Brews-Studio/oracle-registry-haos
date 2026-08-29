@@ -5,91 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="color-scheme" content="dark light" />
 <title>Oracle Registry</title>
-<style>
-  /* No build step and no CDN. A sibling add-on in this repo learned that a
-     committed dist/ goes stale against its source without saying so; what you
-     read here is what runs. */
-  :root {
-    --bg: #0f1115; --panel: #161922; --line: #242936; --ink: #e6e9ef;
-    --muted: #8b93a7; --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    --up: #3fb950; --down: #f85149; --stale: #d29922; --unknown: #6e7681; --accent: #58a6ff;
+<!-- Vendored, not CDN: an HA box on a LAN without internet must still render
+     this page. React 18 UMD (19 dropped UMD), htm for JSX-without-a-build,
+     Tailwind v4 browser build for styling at runtime. -->
+<script src="./vendor/react.js"></script>
+<script src="./vendor/react-dom.js"></script>
+<script src="./vendor/htm.js"></script>
+<script src="./vendor/tailwind.js"></script>
+<style type="text/tailwindcss">
+  @theme {
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6ec; --ink:#1b1f27; --muted:#5b6478; }
-  }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,sans-serif; }
-  header { padding:20px 24px 0; }
-  h1 { margin:0 0 2px; font-size:19px; font-weight:650; letter-spacing:-.01em; }
-  .sub { color:var(--muted); font-size:13px; }
-  .bar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; padding:16px 24px; }
-  .stat { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:9px 14px; }
-  .stat b { font-size:19px; font-variant-numeric:tabular-nums; }
-  .stat span { color:var(--muted); font-size:12px; display:block; }
-  main { padding:0 24px 32px; }
-  table { width:100%; border-collapse:collapse; background:var(--panel);
-          border:1px solid var(--line); border-radius:10px; overflow:hidden; }
-  th,td { padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); }
-  th { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:600; }
-  tr:last-child td { border-bottom:0; }
-  .name { font-family:var(--mono); font-weight:600; }
-  .pill { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600;
-          padding:3px 9px; border-radius:999px; border:1px solid transparent; }
-  .dot { width:7px; height:7px; border-radius:50%; }
-  .online  { color:var(--up);      background:color-mix(in srgb,var(--up) 12%,transparent);      border-color:color-mix(in srgb,var(--up) 32%,transparent); }
-  .offline { color:var(--down);    background:color-mix(in srgb,var(--down) 12%,transparent);    border-color:color-mix(in srgb,var(--down) 32%,transparent); }
-  .stale   { color:var(--stale);   background:color-mix(in srgb,var(--stale) 12%,transparent);   border-color:color-mix(in srgb,var(--stale) 32%,transparent); }
-  .unknown { color:var(--unknown); background:color-mix(in srgb,var(--unknown) 12%,transparent); border-color:color-mix(in srgb,var(--unknown) 32%,transparent); }
-  .dim { color:var(--muted); font-size:13px; }
-  .mono { font-family:var(--mono); font-size:12.5px; }
-  .empty { padding:44px 24px; text-align:center; color:var(--muted); }
-  .empty code { font-family:var(--mono); background:var(--panel); border:1px solid var(--line);
-                padding:2px 6px; border-radius:5px; font-size:12.5px; }
-  button { font:inherit; font-size:13px; background:var(--panel); color:var(--ink);
-           border:1px solid var(--line); border-radius:8px; padding:7px 13px; cursor:pointer; }
-  button:hover { border-color:var(--accent); }
-  .warn { background:color-mix(in srgb,var(--down) 10%,transparent);
-          border:1px solid color-mix(in srgb,var(--down) 35%,transparent);
-          border-radius:9px; padding:11px 14px; margin:0 24px 14px; font-size:13px; }
-  details { margin:20px 0 0; }
-  summary { cursor:pointer; color:var(--muted); font-size:13px; }
-  .key { font-family:var(--mono); font-size:12px; word-break:break-all;
-         background:var(--bg); border:1px solid var(--line); border-radius:7px; padding:9px; margin:8px 0; }
+  body { @apply bg-slate-100 text-slate-900 dark:bg-[#0f1115] dark:text-slate-200 m-0 font-sans text-[15px]; }
 </style>
 </head>
 <body>
-<header>
-  <h1>Oracle Registry</h1>
-  <div class="sub">Liveness from MQTT's Last Will and Testament — the broker reports a death nobody was alive to report.</div>
-</header>
-
-<div id="alert"></div>
-
-<div class="bar">
-  <div class="stat"><b id="n-online">–</b><span>online</span></div>
-  <div class="stat"><b id="n-stale">–</b><span>stale</span></div>
-  <div class="stat"><b id="n-offline">–</b><span>offline</span></div>
-  <div class="stat"><b id="n-total">–</b><span>known</span></div>
-  <button id="refresh">Refresh</button>
-  <span class="dim" id="updated"></span>
-</div>
-
-<main>
-  <div id="table"></div>
-
-  <details>
-    <summary>API keys — for reading this registry from outside Home Assistant</summary>
-    <p class="dim">The sidebar is authenticated by Home Assistant, so it needs no key. A key is for
-      anything else: <code class="mono">Authorization: Bearer &lt;key&gt;</code>. Keys can only be minted
-      here, never by another key.</p>
-    <button id="mint">Mint a key</button>
-    <div id="keyout"></div>
-    <div id="keys"></div>
-  </details>
-</main>
-
+<div id="root"></div>
 <script>
-const $ = (id) => document.getElementById(id);
+const { useState, useEffect, useRef, useCallback } = React;
+const html = htm.bind(React.createElement);
+
 // Relative fetches so the same page works under the ingress path and directly.
 const api = (p, o) => fetch('.' + p, o).then(async r => {
   const body = await r.json().catch(() => ({}));
@@ -106,88 +41,237 @@ const ago = (iso) => {
   if (s < 86400) return Math.floor(s / 3600) + 'h ago';
   return Math.floor(s / 86400) + 'd ago';
 };
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-function pill(o) {
-  const k = o.stale ? 'stale' : (o.state === 'online' ? 'online' : o.state === 'offline' ? 'offline' : 'unknown');
-  const label = o.stale ? 'stale' : o.state;
-  return `<span class="pill ${k}"><span class="dot" style="background:currentColor"></span>${label}</span>`;
-}
-
-async function load() {
-  try {
-    const health = await api('/api/health');
-    $('alert').innerHTML = health.mqtt && health.mqtt.connected
-      ? ''
-      : `<div class="warn"><b>Not connected to the broker.</b> ${esc((health.mqtt && health.mqtt.error) || 'connecting…')}
-         — the list below is the last known state, not live.</div>`;
-
-    const d = await api('/api/oracles');
-    $('n-online').textContent = d.online;
-    $('n-stale').textContent = d.stale;
-    $('n-offline').textContent = d.offline;
-    $('n-total').textContent = d.count;
-    $('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
-
-    if (!d.count) {
-      $('table').innerHTML = `<div class="empty">
-        <p>No oracle has announced itself yet.</p>
-        <p>An oracle registers by connecting with a retained will and publishing <code>online</code>:</p>
-        <p><code>mosquitto_pub -t 'oracle/&lt;name&gt;/lwt' -m online -r -q 1 \\<br>
-           &nbsp;&nbsp;--will-topic 'oracle/&lt;name&gt;/lwt' --will-payload offline --will-retain</code></p>
-      </div>`;
-      return;
-    }
-
-    $('table').innerHTML = `<table><thead><tr>
-        <th>Oracle</th><th>State</th><th>Host</th><th>Last seen</th>
-        <th>Online since</th><th>Transitions</th>
-      </tr></thead><tbody>` +
-      d.oracles.map(o => `<tr>
-        <td class="name">${esc(o.name)}</td>
-        <td>${pill(o)}</td>
-        <td class="mono">${esc(o.host || '—')}</td>
-        <td class="dim">${ago(o.lastSeen)}</td>
-        <td class="dim">${o.state === 'online' ? ago(o.lastOnline) : '—'}</td>
-        <td class="dim">${o.transitions}</td>
-      </tr>`).join('') + `</tbody></table>`;
-  } catch (e) {
-    $('table').innerHTML = `<div class="empty">Could not load: ${esc(e.message)}</div>`;
-  }
-}
-
-async function loadKeys() {
-  try {
-    const d = await api('/api/keys');
-    $('keys').innerHTML = d.keys.length
-      ? '<table><thead><tr><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody>' +
-        d.keys.map(k => `<tr><td>${esc(k.label)}</td><td class="dim">${esc(k.created_at.slice(0,10))}</td>
-          <td class="dim">${k.last_used ? ago(k.last_used) : 'never'}</td>
-          <td><button data-revoke="${esc(k.id)}">Revoke</button></td></tr>`).join('') + '</tbody></table>'
-      : '<p class="dim">No keys yet.</p>';
-    $('keys').querySelectorAll('[data-revoke]').forEach(b => b.onclick = async () => {
-      await api('/api/keys/' + b.dataset.revoke, { method: 'DELETE' });
-      loadKeys();
-    });
-  } catch (e) { $('keys').innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
-}
-
-$('refresh').onclick = load;
-$('mint').onclick = async () => {
-  const label = prompt('What is this key for?', 'fleet dashboard');
-  if (label === null) return;
-  const k = await api('/api/keys', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ label }),
-  });
-  $('keyout').innerHTML = `<div class="key">${esc(k.key)}</div>
-    <p class="dim">Copy it now — it is not shown again.</p>`;
-  loadKeys();
+const PILL = {
+  online:  'text-green-500 bg-green-500/10 border-green-500/30',
+  offline: 'text-red-500 bg-red-500/10 border-red-500/30',
+  stale:   'text-yellow-500 bg-yellow-500/10 border-yellow-500/30',
+  unknown: 'text-slate-400 bg-slate-400/10 border-slate-400/30',
 };
+const Pill = ({ kind, label }) => html`
+  <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-0.5 rounded-full border ${PILL[kind]}">
+    <span class="w-1.5 h-1.5 rounded-full bg-current"></span>${label}
+  </span>`;
 
-load(); loadKeys();
-setInterval(load, 10000);
+const Stat = ({ n, label }) => html`
+  <div class="bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-xl px-3.5 py-2">
+    <b class="text-lg tabular-nums">${n ?? '–'}</b>
+    <span class="block text-xs text-slate-500 dark:text-slate-400">${label}</span>
+  </div>`;
+
+const btn = 'text-[13px] bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-lg px-3 py-1.5 cursor-pointer hover:border-sky-400 transition-colors';
+const inp = 'text-[13px] bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-lg px-2.5 py-1.5 outline-none focus:border-sky-400';
+
+function Compose({ name, onClose }) {
+  const [room, setRoom] = useState('main');
+  const [text, setText] = useState('');
+  const [log, setLog] = useState([]);
+  const latest = useRef(0);
+  const poll = useRef(null);
+
+  useEffect(() => () => clearInterval(poll.current), []);
+
+  const send = async (ev) => {
+    ev.preventDefault();
+    const msg = text.trim();
+    if (!msg) return;
+    try {
+      // Snapshot the ring position BEFORE sending, so the poll shows only
+      // replies that arrive after this message.
+      try { latest.current = (await api(`/api/oracles/${encodeURIComponent(name)}/replies?since=999999999`)).latest; } catch {}
+      await api(`/api/oracles/${encodeURIComponent(name)}/send`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ room: room.trim() || 'main', text: msg }),
+      });
+      setText('');
+      setLog(l => [...l, { dir: '→', text: msg }]);
+      clearInterval(poll.current);
+      let ticks = 0;
+      poll.current = setInterval(async () => {
+        if (++ticks > 30) { clearInterval(poll.current); return; }
+        try {
+          const r = await api(`/api/oracles/${encodeURIComponent(name)}/replies?since=${latest.current}`);
+          latest.current = r.latest;
+          r.replies.forEach(x => {
+            const t = x.msg && typeof x.msg === 'object' && 'text' in x.msg ? x.msg.text : JSON.stringify(x.msg);
+            setLog(l => [...l, { dir: '←', room: x.room, text: t }]);
+          });
+        } catch {}
+      }, 2000);
+    } catch (e) {
+      setLog(l => [...l, { dir: '✗', text: e.message }]);
+    }
+  };
+
+  return html`
+    <tr><td colSpan="8" class="bg-slate-50 dark:bg-[#0f1115] px-3.5 py-3 border-b border-slate-200 dark:border-[#242936]">
+      <form class="flex gap-2 items-center flex-wrap" onSubmit=${send}>
+        <input class="${inp} w-24" value=${room} onInput=${e => setRoom(e.target.value)} title="room" />
+        <input class="${inp} flex-1 min-w-[220px]" placeholder="Message to ${name}…" autoFocus
+               value=${text} onInput=${e => setText(e.target.value)} />
+        <button class=${btn} type="submit">Send</button>
+        <button class=${btn} type="button" onClick=${onClose}>Close</button>
+      </form>
+      ${log.length > 0 && html`
+        <div class="mt-2">
+          ${log.map((x, i) => html`
+            <div key=${i} class="font-mono text-[12.5px] py-1 border-t border-dashed border-slate-200 dark:border-[#242936] whitespace-pre-wrap break-words">
+              ${x.dir} ${x.room ? `[${x.room}] ` : ''}${x.text}
+            </div>`)}
+        </div>`}
+    </td></tr>`;
+}
+
+const th = 'text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-semibold text-left px-3.5 py-2.5 border-b border-slate-200 dark:border-[#242936]';
+const td = 'px-3.5 py-2.5 border-b border-slate-200 dark:border-[#242936]';
+const dim = 'text-[13px] text-slate-500 dark:text-slate-400';
+
+function Table({ data, dispatchOn, composeFor, setComposeFor }) {
+  if (!data) return null;
+  if (!data.count) return html`
+    <div class="py-11 px-6 text-center text-slate-500 dark:text-slate-400">
+      <p>No oracle has announced itself yet.</p>
+      <p class="mt-2">An oracle registers by connecting with a retained will and publishing <code class="font-mono text-[12.5px]">online</code>:</p>
+      <p class="mt-2"><code class="font-mono text-[12.5px] bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] px-1.5 py-0.5 rounded">
+        mosquitto_pub -t 'oracle/‹name›/lwt' -m online -r -q 1 --will-topic 'oracle/‹name›/lwt' --will-payload offline --will-retain</code></p>
+    </div>`;
+
+  return html`
+    <table class="w-full border-collapse bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-xl overflow-hidden">
+      <thead><tr>
+        <th class=${th}>Oracle</th><th class=${th}>State</th><th class=${th}>Channel</th><th class=${th}>Host</th>
+        <th class=${th}>Last seen</th><th class=${th}>Online since</th><th class=${th}>Transitions</th><th class=${th}></th>
+      </tr></thead>
+      <tbody>
+        ${data.oracles.map(o => html`
+          <${React.Fragment} key=${o.name}>
+            <tr>
+              <td class="${td} font-mono font-semibold">${o.name}</td>
+              <td class=${td}><${Pill} kind=${o.stale ? 'stale' : (PILL[o.state] ? o.state : 'unknown')} label=${o.stale ? 'stale' : o.state} /></td>
+              <td class=${td}>${o.channel === true ? html`<${Pill} kind="online" label="channel" />`
+                             : o.channel === false ? html`<${Pill} kind="offline" label="channel down" />`
+                             : html`<span class=${dim}>—</span>`}</td>
+              <td class="${td} font-mono text-[12.5px]">${o.host || '—'}</td>
+              <td class="${td} ${dim}">${ago(o.lastSeen)}</td>
+              <td class="${td} ${dim}">${o.state === 'online' ? ago(o.lastOnline) : '—'}</td>
+              <td class="${td} ${dim}">${o.transitions}</td>
+              <td class=${td}>${o.channel === true && dispatchOn && html`
+                <button class=${btn} onClick=${() => setComposeFor(o.name)}>Send</button>`}</td>
+            </tr>
+            ${composeFor === o.name && html`<${Compose} name=${o.name} onClose=${() => setComposeFor(null)} />`}
+          <//>`)}
+      </tbody>
+    </table>`;
+}
+
+function Keys() {
+  const [keys, setKeys] = useState([]);
+  const [minted, setMinted] = useState(null);
+  const load = useCallback(() => api('/api/keys').then(d => setKeys(d.keys)).catch(() => {}), []);
+  useEffect(() => { load(); }, [load]);
+
+  const mint = async () => {
+    const label = prompt('What is this key for?', 'fleet dashboard');
+    if (label === null) return;
+    const can = confirm('Allow this key to DISPATCH messages to oracles?\n\nOK = can send (treat like a write credential)\nCancel = read-only');
+    const k = await api('/api/keys', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label, can_dispatch: can }),
+    });
+    setMinted(k.key);
+    load();
+  };
+  const revoke = async (id) => { await api('/api/keys/' + id, { method: 'DELETE' }); load(); };
+
+  return html`
+    <details class="mt-5">
+      <summary class="cursor-pointer text-[13px] text-slate-500 dark:text-slate-400">API keys — for reading this registry from outside Home Assistant</summary>
+      <p class="${dim} mt-2">The sidebar is authenticated by Home Assistant, so it needs no key. A key is for anything else:
+        <code class="font-mono text-[12.5px]">Authorization: Bearer ‹key›</code>. Keys can only be minted here, never by another key.
+        A dispatch-capable key can send messages into oracle sessions — treat it like a write credential.</p>
+      <button class="${btn} mt-2" onClick=${mint}>Mint a key</button>
+      ${minted && html`
+        <div class="font-mono text-xs break-all bg-slate-100 dark:bg-[#0f1115] border border-slate-200 dark:border-[#242936] rounded-lg p-2.5 my-2">${minted}</div>
+        <p class=${dim}>Copy it now — it is not shown again.</p>`}
+      ${keys.length > 0 && html`
+        <table class="w-full border-collapse bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-xl overflow-hidden mt-2">
+          <thead><tr><th class=${th}>Label</th><th class=${th}>Dispatch</th><th class=${th}>Created</th><th class=${th}>Last used</th><th class=${th}></th></tr></thead>
+          <tbody>${keys.map(k => html`
+            <tr key=${k.id}>
+              <td class=${td}>${k.label}</td>
+              <td class=${td}>${k.can_dispatch ? html`<${Pill} kind="stale" label="can send" />` : html`<span class=${dim}>read-only</span>`}</td>
+              <td class="${td} ${dim}">${k.created_at.slice(0, 10)}</td>
+              <td class="${td} ${dim}">${k.last_used ? ago(k.last_used) : 'never'}</td>
+              <td class=${td}><button class=${btn} onClick=${() => revoke(k.id)}>Revoke</button></td>
+            </tr>`)}</tbody>
+        </table>`}
+    </details>`;
+}
+
+function App() {
+  const [health, setHealth] = useState(null);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [updated, setUpdated] = useState('');
+  const [composeFor, setComposeFor] = useState(null);
+  const composeRef = useRef(null);
+  composeRef.current = composeFor;
+
+  const load = useCallback(async () => {
+    try {
+      const h = await api('/api/health');
+      const d = await api('/api/oracles');
+      setHealth(h); setData(d); setErr(null);
+      setUpdated('updated ' + new Date().toLocaleTimeString());
+    } catch (e) { setErr(e.message); }
+  }, []);
+
+  useEffect(() => {
+    load();
+    // The repaint is skipped while a compose row is open — a redraw
+    // mid-typing would reset the form.
+    const t = setInterval(() => { if (!composeRef.current) load(); }, 10000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const dispatchOn = !!(health && health.dispatch && health.dispatch.enabled && health.dispatch.connected);
+
+  return html`
+    <div>
+      <header class="pt-5 px-6">
+        <h1 class="text-[19px] font-semibold tracking-tight m-0">Oracle Registry</h1>
+        <div class="text-[13px] text-slate-500 dark:text-slate-400">
+          Liveness from MQTT's Last Will and Testament — the broker reports a death nobody was alive to report.
+        </div>
+      </header>
+
+      ${health && !(health.mqtt && health.mqtt.connected) && html`
+        <div class="bg-red-500/10 border border-red-500/35 rounded-lg px-3.5 py-2.5 mx-6 mt-3.5 text-[13px]">
+          <b>Not connected to the broker.</b> ${(health.mqtt && health.mqtt.error) || 'connecting…'} — the list below is the last known state, not live.
+        </div>`}
+
+      <div class="flex gap-2.5 flex-wrap items-center px-6 py-4">
+        <${Stat} n=${data && data.online} label="online" />
+        <${Stat} n=${data && data.stale} label="stale" />
+        <${Stat} n=${data && data.offline} label="offline" />
+        <${Stat} n=${data && data.count} label="known" />
+        <button class=${btn} onClick=${load}>Refresh</button>
+        <span class=${dim}>${updated}</span>
+        ${health && health.dispatch && health.dispatch.enabled && !health.dispatch.connected && html`
+          <span class="text-[12px] text-yellow-500">dispatch configured but disconnected</span>`}
+      </div>
+
+      <main class="px-6 pb-8">
+        ${err ? html`<div class="py-11 text-center text-slate-500">Could not load: ${err}</div>`
+              : html`<${Table} data=${data} dispatchOn=${dispatchOn} composeFor=${composeFor} setComposeFor=${setComposeFor} />`}
+        <${Keys} />
+      </main>
+    </div>`;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`);
 </script>
 </body>
 </html>
