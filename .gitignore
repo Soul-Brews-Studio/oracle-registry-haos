@@ -4,4 +4,7 @@ bun.lock
 
 # Local Oracle vault — never commit or push session memory.
 ψ/
+
+# Personal, per-machine — not repo config.
+.envrc
 oracle-registry/rootfs/web/vendor/
