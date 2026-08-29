@@ -87,3 +87,27 @@ publishes its own retained `offline` before ending.
 Apache-2.0. Clean-room implementation against the registry's published
 contract; the topic shape follows the same channel lineage as the official
 Discord plugin (`notifications/claude/channel`).
+
+## Registration, and how leaving differs from dying
+
+A running session is a live fleet member, so the plugin speaks the registry's
+own contract too — otherwise the board shows a reachable channel beside a
+member stuck at state `unknown`, which is two answers to one question.
+
+| topic | payload |
+|---|---|
+| `oracle/<name>/lwt` *(retained)* | `online`, with a will of `offline` |
+| `oracle/<name>/meta` *(retained)* | `{host, repo, client, version, since}` |
+
+Set `OC_REGISTER=false` to run as a channel only, or `OC_PREFIX` if your
+registry watches something other than `oracle`.
+
+**A deliberate exit clears its retains; a death leaves `offline` behind.**
+MQTT gives a subscriber no "this was a will" flag, so a departure and a crash
+normally arrive identically. Clearing on the way out makes them tell apart:
+an absent retain means it meant to go, a remaining `offline` means the broker
+reported it. The registry records which, as the event source (`clear` vs
+`lwt`) — the difference between a tidy shutdown and a 3am incident.
+
+`OC_KEEPALIVE` defaults to 5 seconds, so a killed session is visibly offline in
+about seven. That is the dial that decides how fast the fleet notices a death.

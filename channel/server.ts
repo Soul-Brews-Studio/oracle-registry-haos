@@ -28,13 +28,14 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import mqtt from "mqtt";
 
 const VERSION = "0.1.0";
 const CLIENT = "oracle-channel"; // identifies this implementation in presence payloads
+const SINCE = new Date().toISOString(); // when this session came up, carried in both contracts
 
 // ── configuration ───────────────────────────────────────────────────────────
 
@@ -69,7 +70,11 @@ const BROKER = process.env.OC_BROKER ?? "mqtt://127.0.0.1:1883";
 const USERNAME = process.env.OC_USERNAME ?? "";
 const PASSWORD = process.env.OC_PASSWORD ?? "";
 const QOS = Number(process.env.OC_QOS ?? 0) as 0 | 1 | 2;
-const KEEPALIVE = Number(process.env.OC_KEEPALIVE ?? 15);
+// A broker declares a client dead after roughly 1.5x keepalive, so this is the
+// dial that decides how fast a killed session becomes visibly offline. Five
+// seconds buys ~7s detection for two small packets a minute — worth it when
+// the entire point of the registry is noticing deaths quickly.
+const KEEPALIVE = Number(process.env.OC_KEEPALIVE ?? 5);
 
 /**
  * The oracle's name, which is also its topic namespace. It defaults to the
@@ -108,6 +113,24 @@ const outTopic = (room: string) => `${NAME}/${room}/out`;
 // Presence is reliability-critical and must not inherit a QoS 0 setting meant
 // for chat volume: a dropped will is a member the registry believes is alive.
 const STATUS_QOS = 1;
+
+/**
+ * Fleet registration. A running session is a live fleet member, so this plugin
+ * also speaks the registry's own contract — otherwise the board shows the
+ * channel as reachable while the member itself sits at state "unknown", which
+ * is two answers to what is really one question.
+ *
+ * These are DIFFERENT topics from the channel's presence, under the registry's
+ * prefix, and they need their own will: MQTT allows exactly one will per
+ * connection. Hence a second connection below rather than inferring one
+ * contract's death from the other's — a member whose lwt comes from a shell
+ * script while its channel runs elsewhere would make that inference wrong.
+ */
+const REGISTER = (process.env.OC_REGISTER ?? "true").toLowerCase() !== "false";
+const PREFIX = (process.env.OC_PREFIX ?? "oracle").replace(/\/+$/, "");
+const LWT_TOPIC = `${PREFIX}/${NAME}/lwt`;
+const META_TOPIC = `${PREFIX}/${NAME}/meta`;
+const HOST = (process.env.OC_HOST ?? hostname()).split(".")[0];
 
 // ── mcp ─────────────────────────────────────────────────────────────────────
 
@@ -207,7 +230,7 @@ function start() {
     // the registry rebuilds the whole fleet in one subscribe.
     client!.publish(
       STATUS_TOPIC,
-      JSON.stringify({ online: true, client: CLIENT, version: VERSION, ts: new Date().toISOString() }),
+      JSON.stringify({ online: true, client: CLIENT, version: VERSION, since: SINCE, ts: new Date().toISOString() }),
       { qos: STATUS_QOS, retain: true },
     );
     client!.subscribe(IN_TOPIC, { qos: 1 }, (err) => {
@@ -250,7 +273,7 @@ function start() {
     });
   });
 
-  client.on("error", (err) => log(`mqtt error: ${err.message}`));
+  client.on("error", (err) => log(`channel mqtt error: ${err.message}`));
 
   // Flap detector. When another live session claims the same name, the broker
   // hands the clientId back and forth and each side sees rapid closes. Say
@@ -272,26 +295,83 @@ function start() {
   });
 }
 
+// ── fleet registration ──────────────────────────────────────────────────────
+
+let citizen: mqtt.MqttClient | null = null;
+
+function register() {
+  if (!REGISTER) {
+    log("OC_REGISTER=false — not registering as a fleet member");
+    return;
+  }
+  citizen = mqtt.connect(BROKER, {
+    username: USERNAME || undefined,
+    password: PASSWORD || undefined,
+    clientId: `oracle-member-${NAME}`,
+    clean: true,
+    keepalive: KEEPALIVE,
+    reconnectPeriod: 1000,
+    connectTimeout: 10_000,
+    // The will the whole registry is built on: if this session is killed,
+    // loses power, or drops off the network, the BROKER says so on its behalf.
+    will: { topic: LWT_TOPIC, payload: "offline", qos: 1, retain: true },
+  });
+
+  citizen.on("connect", () => {
+    // Identity first, then liveness — so a board that sees "online" already has
+    // the host to show beside it rather than a row that fills in late.
+    citizen!.publish(
+      META_TOPIC,
+      JSON.stringify({
+        host: HOST,
+        repo: process.env.PWD || process.cwd(),
+        client: CLIENT,
+        version: VERSION,
+        since: SINCE,
+      }),
+      { qos: 1, retain: true },
+    );
+    citizen!.publish(LWT_TOPIC, "online", { qos: 1, retain: true });
+    log(`registered as ${PREFIX}/${NAME} on host ${HOST}`);
+  });
+
+  citizen.on("error", (err) => log(`registration mqtt error: ${err.message}`));
+}
+
 // ── lifecycle ───────────────────────────────────────────────────────────────
 
 await mcp.connect(new StdioServerTransport());
 start();
+register();
 
 let shuttingDown = false;
 function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   // A clean DISCONNECT makes the broker DROP the will (MQTT-3.1.2-10), so a
-  // graceful exit has to publish its own goodbye — otherwise the last retained
-  // value stays "online" forever and the registry believes a dead session.
+  // graceful exit must say goodbye itself — and it says it DIFFERENTLY.
+  //
+  // Leaving on purpose CLEARS the retains (empty retained payload). Dying
+  // leaves the broker to publish `offline`. MQTT carries no "this was a will"
+  // flag, so a subscriber normally cannot tell a departure from a death — but
+  // an absent retain and an `offline` retain are plainly different, and the
+  // registry already reads an empty payload as a deliberate goodbye. The same
+  // clearing also stops a decommissioned member reappearing on every restart.
   const done = () => process.exit(0);
-  if (!client?.connected) return done();
-  client.publish(
-    STATUS_TOPIC,
-    JSON.stringify({ online: false, client: CLIENT, reason: "shutdown", ts: new Date().toISOString() }),
-    { qos: STATUS_QOS, retain: true },
-    () => client!.end(false, {}, done),
-  );
+  let pending = 0;
+  const settle = () => { if (--pending <= 0) done(); };
+
+  if (client?.connected) {
+    pending++;
+    client.publish(STATUS_TOPIC, "", { qos: STATUS_QOS, retain: true }, () => client!.end(false, {}, settle));
+  }
+  if (citizen?.connected) {
+    pending++;
+    citizen.publish(LWT_TOPIC, "", { qos: 1, retain: true }, () =>
+      citizen!.publish(META_TOPIC, "", { qos: 1, retain: true }, () => citizen!.end(false, {}, settle)),
+    );
+  }
+  if (pending === 0) return done();
   setTimeout(done, 2000).unref();
 }
 

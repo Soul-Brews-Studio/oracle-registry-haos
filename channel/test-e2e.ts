@@ -33,12 +33,16 @@ await new Promise<void>((res, rej) => {
   bus.once("connect", () => res());
   bus.once("error", (e) => rej(new Error(`no broker at ${BROKER}: ${e.message}`)));
 });
-// Start from a clean slate: clear any retained status from a previous run.
-bus.publish(`${NAME}/status`, "", { retain: true });
+// Start from a clean slate: clear any retained state from a previous run.
+for (const t of [`${NAME}/status`, `oracle/${NAME}/lwt`, `oracle/${NAME}/meta`]) {
+  bus.publish(t, "", { retain: true });
+}
 
 const seen: { topic: string; payload: string }[] = [];
 bus.on("message", (t, p) => seen.push({ topic: t, payload: p.toString() }));
-await new Promise<void>((res) => bus.subscribe([`${NAME}/status`, `${NAME}/+/out`], () => res()));
+await new Promise<void>((res) =>
+  bus.subscribe([`${NAME}/status`, `${NAME}/+/out`, `oracle/${NAME}/lwt`, `oracle/${NAME}/meta`], () => res()),
+);
 
 // ── server under test ───────────────────────────────────────────────────────
 
@@ -82,6 +86,14 @@ rpc({ jsonrpc: "2.0", method: "notifications/initialized" });
 // 2. retained presence appears after connect
 const status = await until(() => seen.find((m) => m.topic === `${NAME}/status` && m.payload.includes('"online":true')));
 check("retained status online", !!status && JSON.parse(status!.payload).client === "oracle-channel");
+check("status carries since", !!status && typeof JSON.parse(status!.payload).since === "string");
+
+// 2b. it also registers as a fleet member on the registry's own contract
+const lwt = await until(() => seen.find((m) => m.topic === `oracle/${NAME}/lwt` && m.payload === "online"));
+check("registers lwt online", !!lwt);
+const meta = await until(() => seen.find((m) => m.topic === `oracle/${NAME}/meta` && m.payload.includes("host")));
+const metaObj = meta ? JSON.parse(meta.payload) : null;
+check("meta carries host and repo", !!metaObj?.host && !!metaObj?.repo && typeof metaObj?.since === "string");
 
 // 3. JSON inbound → channel notification with meta
 bus.publish(`${NAME}/room1/in`, JSON.stringify({ text: "hello json", user: "nat", id: "m1" }));
@@ -115,12 +127,19 @@ rpc({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "reply", argu
 const bad = await until(() => fromServer.find((m) => m.id === 4));
 check("wildcard chat_id refused", bad?.result?.isError === true);
 
-// 9. clean shutdown flips retained presence to offline
+// 9. a deliberate exit CLEARS its retains — that is what distinguishes leaving
+//    from dying, since a will and a self-published "offline" look identical.
+seen.length = 0;
 child.stdin.end();
-const bye = await until(() => seen.find((m) => m.topic === `${NAME}/status` && m.payload.includes('"reason":"shutdown"')), 6000);
-check("shutdown publishes retained offline", !!bye && JSON.parse(bye!.payload).online === false);
+const statusCleared = await until(() => seen.find((m) => m.topic === `${NAME}/status` && m.payload === ""), 6000);
+check("clean exit clears retained status", !!statusCleared);
+const lwtCleared = await until(() => seen.find((m) => m.topic === `oracle/${NAME}/lwt` && m.payload === ""), 6000);
+check("clean exit clears retained lwt", !!lwtCleared);
+check("clean exit leaves no 'offline' behind", !seen.some((m) => m.payload === "offline"));
 
 bus.publish(`${NAME}/status`, "", { retain: true });
+bus.publish(`oracle/${NAME}/lwt`, "", { retain: true });
+bus.publish(`oracle/${NAME}/meta`, "", { retain: true });
 bus.end();
 child.kill();
 console.log(`\n${passed} passed, ${failed} failed`);

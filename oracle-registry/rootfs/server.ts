@@ -278,6 +278,14 @@ function startMqtt() {
       // An EMPTY retained payload is how a client clears its retain on a clean
       // shutdown. That is a deliberate goodbye, not a malformed message, and it
       // means offline just as much as the will does.
+      //
+      // It also carries information the will cannot: MQTT gives a subscriber no
+      // "this was a will" flag, so a departure and a death arrive identically —
+      // UNLESS the departing client clears its retain instead of writing
+      // `offline`. A cleared retain therefore means "it meant to go"; a
+      // remaining `offline` means "the broker reported it". The events table
+      // keeps that as the source, which is the difference between a tidy
+      // shutdown and a 3am incident.
       if (text === "") {
         recordState(lwtName, "offline", "clear");
         return;
