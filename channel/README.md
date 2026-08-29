@@ -6,10 +6,15 @@ see it live and die (LWT), and send messages into it — which arrive in the
 session as channel messages, not tool calls.
 
 ```
-<name>/<room>/in    →  the session, as notifications/claude/channel
-<name>/<room>/out   ←  the session's `reply` tool
-<name>/status       ←  retained presence, LWT-backed — the registration
+oracle/<name>/<room>/in    →  the session, as notifications/claude/channel
+oracle/<name>/<room>/out   ←  the session's `reply` tool
+oracle/<name>/status       ←  retained presence, LWT-backed — the registration
+oracle/<name>/lwt + /meta  ←  fleet registration (the registry's own contract)
 ```
+
+One tree, one name: everything lives under the registry's prefix (`oracle`,
+override with `OC_PREFIX`), so a subscriber scopes to `oracle/#` instead of
+guessing which bare top-level names are oracles.
 
 ## Identity comes from the directory
 
@@ -58,12 +63,12 @@ Identity (`OC_NAME`) never goes in the shared file — it is per repo.
 
 ```bash
 # watch the session's replies
-mosquitto_sub -t 'my-oracle/+/out' -v
+mosquitto_sub -t 'oracle/my-oracle/+/out' -v
 
 # send it a message
-mosquitto_pub -t 'my-oracle/room1/in' -m '{"text":"hello in there","user":"nat"}'
+mosquitto_pub -t 'oracle/my-oracle/room1/in' -m '{"text":"hello in there","user":"nat"}'
 # a bare string works too
-mosquitto_pub -t 'my-oracle/room1/in' -m 'hello'
+mosquitto_pub -t 'oracle/my-oracle/room1/in' -m 'hello'
 ```
 
 Channel messages are written by whoever holds a dispatch credential. The

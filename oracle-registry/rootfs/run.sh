@@ -22,7 +22,7 @@ console.log(`export OR_DISPATCH_PASS=${q(o.dispatch_password)}`);
 
 # Single source for the version the health endpoint reports — config.yaml is
 # not readable from inside the container, and a hardcoded fallback drifts.
-export OR_VERSION="0.2.0"
+export OR_VERSION="0.2.1"
 
 if [ -z "${OR_BROKER:-}" ]; then
     echo "oracle-registry: no broker set — open Configuration and set one." >&2

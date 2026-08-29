@@ -223,12 +223,12 @@ function startMqtt() {
 
   client.on("connect", () => {
     mqttStatus = { connected: true, error: null, since: nowIso() };
-    // Exact patterns only. Never `#` — on a fleet broker that is ~109 GB/day,
-    // a lesson this fleet paid for once already.
-    //   +/status  — the arra-mqtt-channel plugin's retained LWT-backed
-    //               presence; the channel's own connection IS its registration.
-    //   +/+/out   — channel replies, depth-3 exactly so out/img stays out.
-    const topics = [`${PREFIX}/+/lwt`, `${PREFIX}/+/meta`, `+/status`, `+/+/out`];
+    // Exact patterns only, all under ONE prefix. Never `#` — on a fleet broker
+    // that is ~109 GB/day, a lesson this fleet paid for once already.
+    //   <prefix>/+/status  — the channel plugin's retained LWT-backed presence;
+    //                        the channel's own connection IS its registration.
+    //   <prefix>/+/+/out   — channel replies, exact depth so out/img stays out.
+    const topics = [`${PREFIX}/+/lwt`, `${PREFIX}/+/meta`, `${PREFIX}/+/status`, `${PREFIX}/+/+/out`];
     client.subscribe(topics, { qos: 1 }, (err) => {
       if (err) console.error("[registry] subscribe failed:", err.message);
       else console.log(`[registry] connected, watching ${topics.join(" and ")}`);
@@ -239,11 +239,9 @@ function startMqtt() {
     const text = payload.toString().trim();
     const parts = topic.split("/");
 
-    // <name>/status — the channel plugin's presence. Skip the registry's own
-    // prefix: a stray retained "oracle/status" would otherwise mint a phantom
-    // member literally named after the prefix.
-    if (parts.length === 2 && parts[1] === "status" && parts[0] && parts[0] !== PREFIX) {
-      const name = parts[0];
+    // <prefix>/<name>/status — the channel plugin's presence, same tree as lwt.
+    if (parts.length === 3 && parts[0] === PREFIX && parts[2] === "status") {
+      const name = parts[1];
       if (text === "") {
         // Retain cleared — the channel was decommissioned on purpose.
         q.upsertChannel.run({ $name: name, $online: null, $now: nowIso() });
@@ -263,13 +261,13 @@ function startMqtt() {
       return;
     }
 
-    // <name>/<room>/out — channel replies into the ring buffer. Tolerate any
-    // payload shape: an unparseable reply is still worth showing raw.
-    if (parts.length === 3 && parts[2] === "out" && parts[0] !== PREFIX) {
+    // <prefix>/<name>/<room>/out — channel replies into the ring buffer.
+    // Tolerate any payload shape: an unparseable reply is still worth showing.
+    if (parts.length === 4 && parts[0] === PREFIX && parts[3] === "out") {
       if (text === "") return;
       let msg: unknown;
       try { msg = JSON.parse(text); } catch { msg = { text }; }
-      pushReply(parts[0], parts[1], msg);
+      pushReply(parts[1], parts[2], msg);
       return;
     }
 
@@ -486,7 +484,7 @@ Bun.serve({
       return json({
         status: "ok",
         service: "oracle-registry",
-        version: process.env.OR_VERSION ?? "0.2.0",
+        version: process.env.OR_VERSION ?? "0.2.1",
         mqtt: mqttStatus,
         dispatch: { enabled: DISPATCH_ENABLED, connected: dispatchStatus.connected },
         prefix: PREFIX,
@@ -540,10 +538,10 @@ Bun.serve({
 
         const id = randomBytes(8).toString("hex");
         const user = typeof body.user === "string" && body.user ? body.user.slice(0, 64) : "registry";
-        dispatchClient.publish(`${name}/${room}/in`, JSON.stringify({ text: msgText, user, id }), { qos: 1 });
+        dispatchClient.publish(`${PREFIX}/${name}/${room}/in`, JSON.stringify({ text: msgText, user, id }), { qos: 1 });
         q.addDispatch.run({ $name: name, $room: room, $text: msgText.slice(0, 2048), $via: who, $at: nowIso() });
         q.trimDispatches.run();
-        return json({ sent: true, id, topic: `${name}/${room}/in` });
+        return json({ sent: true, id, topic: `${PREFIX}/${name}/${room}/in` });
       }
 
       // Recent replies from a member's channel, out of the in-memory ring.

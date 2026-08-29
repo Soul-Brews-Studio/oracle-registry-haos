@@ -34,14 +34,14 @@ await new Promise<void>((res, rej) => {
   bus.once("error", (e) => rej(new Error(`no broker at ${BROKER}: ${e.message}`)));
 });
 // Start from a clean slate: clear any retained state from a previous run.
-for (const t of [`${NAME}/status`, `oracle/${NAME}/lwt`, `oracle/${NAME}/meta`]) {
+for (const t of [`oracle/${NAME}/status`, `oracle/${NAME}/lwt`, `oracle/${NAME}/meta`]) {
   bus.publish(t, "", { retain: true });
 }
 
 const seen: { topic: string; payload: string }[] = [];
 bus.on("message", (t, p) => seen.push({ topic: t, payload: p.toString() }));
 await new Promise<void>((res) =>
-  bus.subscribe([`${NAME}/status`, `${NAME}/+/out`, `oracle/${NAME}/lwt`, `oracle/${NAME}/meta`], () => res()),
+  bus.subscribe([`oracle/${NAME}/status`, `oracle/${NAME}/+/out`, `oracle/${NAME}/lwt`, `oracle/${NAME}/meta`], () => res()),
 );
 
 // ── server under test ───────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ check("declares claude/channel capability", !!init?.result?.capabilities?.experi
 rpc({ jsonrpc: "2.0", method: "notifications/initialized" });
 
 // 2. retained presence appears after connect
-const status = await until(() => seen.find((m) => m.topic === `${NAME}/status` && m.payload.includes('"online":true')));
+const status = await until(() => seen.find((m) => m.topic === `oracle/${NAME}/status` && m.payload.includes('"online":true')));
 check("retained status online", !!status && JSON.parse(status!.payload).client === "oracle-channel");
 check("status carries since", !!status && typeof JSON.parse(status!.payload).since === "string");
 
@@ -96,18 +96,18 @@ const metaObj = meta ? JSON.parse(meta.payload) : null;
 check("meta carries host and repo", !!metaObj?.host && !!metaObj?.repo && typeof metaObj?.since === "string");
 
 // 3. JSON inbound → channel notification with meta
-bus.publish(`${NAME}/room1/in`, JSON.stringify({ text: "hello json", user: "nat", id: "m1" }));
+bus.publish(`oracle/${NAME}/room1/in`, JSON.stringify({ text: "hello json", user: "nat", id: "m1" }));
 const n1 = await until(() => fromServer.find((m) => m.method === "notifications/claude/channel" && m.params?.content === "hello json"));
 check("json message delivered", !!n1);
 check("meta carries room and user", n1?.params?.meta?.chat_id === "room1" && n1?.params?.meta?.user === "nat" && n1?.params?.meta?.message_id === "m1");
 
 // 4. bare-string inbound still delivers
-bus.publish(`${NAME}/room1/in`, "plain hello");
+bus.publish(`oracle/${NAME}/room1/in`, "plain hello");
 const n2 = await until(() => fromServer.find((m) => m.method === "notifications/claude/channel" && m.params?.content === "plain hello"));
 check("bare string delivered", !!n2);
 
 // 5. wrong-depth topic is not this contract
-bus.publish(`${NAME}/a/b/in`, JSON.stringify({ text: "too deep" }));
+bus.publish(`oracle/${NAME}/a/b/in`, JSON.stringify({ text: "too deep" }));
 await wait(700);
 check("depth-4 topic ignored", !fromServer.some((m) => m.params?.content === "too deep"));
 
@@ -118,7 +118,7 @@ check("reply tool listed", tools?.result?.tools?.some((t: any) => t.name === "re
 
 // 7. reply publishes the out envelope
 rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "reply", arguments: { chat_id: "room1", text: "pong", reply_to: "m1" } } });
-const out = await until(() => seen.find((m) => m.topic === `${NAME}/room1/out`));
+const out = await until(() => seen.find((m) => m.topic === `oracle/${NAME}/room1/out`));
 const outMsg = out ? JSON.parse(out.payload) : null;
 check("reply reaches out topic", outMsg?.type === "msg" && outMsg?.from === "assistant" && outMsg?.text === "pong" && outMsg?.replyTo === "m1");
 
@@ -131,13 +131,13 @@ check("wildcard chat_id refused", bad?.result?.isError === true);
 //    from dying, since a will and a self-published "offline" look identical.
 seen.length = 0;
 child.stdin.end();
-const statusCleared = await until(() => seen.find((m) => m.topic === `${NAME}/status` && m.payload === ""), 6000);
+const statusCleared = await until(() => seen.find((m) => m.topic === `oracle/${NAME}/status` && m.payload === ""), 6000);
 check("clean exit clears retained status", !!statusCleared);
 const lwtCleared = await until(() => seen.find((m) => m.topic === `oracle/${NAME}/lwt` && m.payload === ""), 6000);
 check("clean exit clears retained lwt", !!lwtCleared);
 check("clean exit leaves no 'offline' behind", !seen.some((m) => m.payload === "offline"));
 
-bus.publish(`${NAME}/status`, "", { retain: true });
+bus.publish(`oracle/${NAME}/status`, "", { retain: true });
 bus.publish(`oracle/${NAME}/lwt`, "", { retain: true });
 bus.publish(`oracle/${NAME}/meta`, "", { retain: true });
 bus.end();

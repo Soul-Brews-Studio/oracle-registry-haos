@@ -93,25 +93,27 @@ decommissioned member stops reappearing on every restart.
 
 ## Channels: the naming convention
 
-Members running the [arra-mqtt-channel](https://github.com/nat-build-with-oracle/arra-mqtt-channel)
-Claude Code plugin are discoverable and messageable with **zero registration
-steps** — the channel's own MQTT connection is its registration. The one rule:
+Members running the [oracle-channel](../channel/) Claude Code plugin are
+discoverable and messageable with **zero registration steps** — the channel's
+own MQTT connection is its registration. The one rule:
 
-> **The channel's `MQTT_TOPIC_PREFIX` must equal the member's registry name.**
+> **The channel's name must equal the member's registry name** (it defaults to
+> the session's directory basename).
 
-The registry then watches these topics (all outside the registry's own prefix):
+Everything lives under the registry's own prefix — one tree, one name:
 
 | topic | direction | payload |
 |---|---|---|
-| `<name>/status` *(retained, LWT-backed)* | channel → registry | `{"online":bool,"client":"mqtt-channel","ts"}` |
-| `<name>/<room>/in` | registry → channel | `{"text","user","id"}` |
-| `<name>/<room>/out` | channel → registry | `{"type":"msg","from":"assistant","text","ts",...}` |
+| `<prefix>/<name>/status` *(retained, LWT-backed)* | channel → registry | `{"online":bool,"client":"oracle-channel","ts"}` |
+| `<prefix>/<name>/<room>/in` | registry → channel | `{"text","user","id"}` |
+| `<prefix>/<name>/<room>/out` | channel → registry | `{"type":"msg","from":"assistant","text","ts",...}` |
 
 A member with a status topic but no `lwt` shows as a channel-only row with
-state `unknown`. A decommissioned channel leaves its retained `<name>/status`
-on the broker — clear it there (`-r -n`) or it reappears, same as `lwt`.
+state `unknown`. A decommissioned channel leaves its retained
+`<prefix>/<name>/status` on the broker — clear it there (`-r -n`) or it
+reappears, same as `lwt`.
 
-Anything published to `<name>/<room>/in` arrives **inside a Claude session as
+Anything published to `<prefix>/<name>/<room>/in` arrives **inside a Claude session as
 a message**. That is the point — and the reason dispatch is treated as a write
 credential everywhere below.
 
@@ -121,7 +123,7 @@ credential everywhere below.
 |---|---|---|
 | `broker` | `mqtt://core-mosquitto:1883` | **hyphen.** `core_mosquitto` is the add-on *slug*; Home Assistant converts underscores to hyphens for the container hostname, and the slug form does not resolve |
 | `username` / `password` | empty | the Mosquitto add-on ships with `logins: []` and anonymous disabled — a login must exist before anything can connect |
-| `topic_prefix` | `oracle` | subscribes to `<prefix>/+/lwt`, `<prefix>/+/meta`, `+/status` and `+/+/out` only, never `#` |
+| `topic_prefix` | `oracle` | subscribes to `<prefix>/+/lwt`, `<prefix>/+/meta`, `<prefix>/+/status` and `<prefix>/+/+/out` only, never `#` |
 | `stale_after_minutes` | `15` | silence past this marks an `online` member stale |
 | `retain_events` | `5000` | transition-history cap; oldest trimmed |
 | `dispatch_username` / `dispatch_password` | empty | a **separate** mosquitto login for the write path. Unset = dispatch off, add-on is a pure watcher. Use a distinct account (e.g. `dispatch`) — never reuse the read login, and mint it fresh rather than recycling an exposed credential. For defense in depth, give it a mosquitto ACL of write-only on `+/+/in` |
@@ -138,7 +140,7 @@ access that survives revoking it.
 | `GET /api/health` | open, unauthenticated — broker connection state, dispatch state, counts |
 | `GET /api/oracles` | the inventory (each row carries `channel: true/false/null`) |
 | `GET /api/oracles/:name` | one member plus its last 100 transitions |
-| `POST /api/oracles/:name/send` | dispatch `{room?, text, user?}` to `<name>/<room>/in`. Needs a dispatch-capable caller: the sidebar, or a key minted with dispatch permission. `503` dispatch off/disconnected · `403` key lacks permission · `400` bad name/room/text · `429` over 30/min. Every send is logged |
+| `POST /api/oracles/:name/send` | dispatch `{room?, text, user?}` to `<prefix>/<name>/<room>/in`. Needs a dispatch-capable caller: the sidebar, or a key minted with dispatch permission. `503` dispatch off/disconnected · `403` key lacks permission · `400` bad name/room/text · `429` over 30/min. Every send is logged |
 | `GET /api/oracles/:name/replies?since=` | recent channel replies (in-memory, last 200 fleet-wide — a live view, not a transcript) |
 | `DELETE /api/oracles/:name` | forget locally *(the retained topics live in the broker — clear `lwt` and `status` there too, or it reappears)* |
 | `GET /api/events?limit=` | the transition log |

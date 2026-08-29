@@ -62,64 +62,99 @@ const Stat = ({ n, label }) => html`
 const btn = 'text-[13px] bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-lg px-3 py-1.5 cursor-pointer hover:border-sky-400 transition-colors';
 const inp = 'text-[13px] bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-lg px-2.5 py-1.5 outline-none focus:border-sky-400';
 
-function Compose({ name, onClose }) {
+/**
+ * A real chat, not a compose form. Polls the replies ring continuously while
+ * open — replies arrive whether or not you just sent something — and renders
+ * sent/received as bubbles with the room shown when it isn't `main`.
+ */
+function Chat({ name, onClose }) {
   const [room, setRoom] = useState('main');
   const [text, setText] = useState('');
   const [log, setLog] = useState([]);
   const latest = useRef(0);
-  const poll = useRef(null);
+  const scroller = useRef(null);
 
-  useEffect(() => () => clearInterval(poll.current), []);
+  // Continuous poll, alive as long as the chat is open. Seed `latest` first so
+  // history starts at "now" rather than replaying the whole ring.
+  useEffect(() => {
+    let stop = false;
+    (async () => {
+      try { latest.current = (await api(`/api/oracles/${encodeURIComponent(name)}/replies?since=999999999`)).latest; } catch {}
+      while (!stop) {
+        try {
+          const r = await api(`/api/oracles/${encodeURIComponent(name)}/replies?since=${latest.current}`);
+          latest.current = r.latest;
+          if (r.replies.length) {
+            setLog(l => [...l, ...r.replies.map(x => ({
+              who: 'them',
+              room: x.room,
+              text: x.msg && typeof x.msg === 'object' && 'text' in x.msg ? x.msg.text : JSON.stringify(x.msg),
+              at: x.at,
+            }))]);
+          }
+        } catch {}
+        await new Promise(res => setTimeout(res, 2000));
+      }
+    })();
+    return () => { stop = true; };
+  }, [name]);
+
+  // Pin to the newest message.
+  useEffect(() => {
+    if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+  }, [log]);
 
   const send = async (ev) => {
     ev.preventDefault();
     const msg = text.trim();
     if (!msg) return;
+    setText('');
+    setLog(l => [...l, { who: 'me', room: room.trim() || 'main', text: msg, at: new Date().toISOString() }]);
     try {
-      // Snapshot the ring position BEFORE sending, so the poll shows only
-      // replies that arrive after this message.
-      try { latest.current = (await api(`/api/oracles/${encodeURIComponent(name)}/replies?since=999999999`)).latest; } catch {}
       await api(`/api/oracles/${encodeURIComponent(name)}/send`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ room: room.trim() || 'main', text: msg }),
       });
-      setText('');
-      setLog(l => [...l, { dir: '→', text: msg }]);
-      clearInterval(poll.current);
-      let ticks = 0;
-      poll.current = setInterval(async () => {
-        if (++ticks > 30) { clearInterval(poll.current); return; }
-        try {
-          const r = await api(`/api/oracles/${encodeURIComponent(name)}/replies?since=${latest.current}`);
-          latest.current = r.latest;
-          r.replies.forEach(x => {
-            const t = x.msg && typeof x.msg === 'object' && 'text' in x.msg ? x.msg.text : JSON.stringify(x.msg);
-            setLog(l => [...l, { dir: '←', room: x.room, text: t }]);
-          });
-        } catch {}
-      }, 2000);
     } catch (e) {
-      setLog(l => [...l, { dir: '✗', text: e.message }]);
+      setLog(l => [...l, { who: 'err', text: e.message, at: new Date().toISOString() }]);
     }
   };
 
   return html`
-    <tr><td colSpan="8" class="bg-slate-50 dark:bg-[#0f1115] px-3.5 py-3 border-b border-slate-200 dark:border-[#242936]">
-      <form class="flex gap-2 items-center flex-wrap" onSubmit=${send}>
-        <input class="${inp} w-24" value=${room} onInput=${e => setRoom(e.target.value)} title="room" />
-        <input class="${inp} flex-1 min-w-[220px]" placeholder="Message to ${name}…" autoFocus
-               value=${text} onInput=${e => setText(e.target.value)} />
-        <button class=${btn} type="submit">Send</button>
-        <button class=${btn} type="button" onClick=${onClose}>Close</button>
-      </form>
-      ${log.length > 0 && html`
-        <div class="mt-2">
-          ${log.map((x, i) => html`
-            <div key=${i} class="font-mono text-[12.5px] py-1 border-t border-dashed border-slate-200 dark:border-[#242936] whitespace-pre-wrap break-words">
-              ${x.dir} ${x.room ? `[${x.room}] ` : ''}${x.text}
-            </div>`)}
-        </div>`}
+    <tr><td colSpan="8" class="bg-slate-50 dark:bg-[#0f1115] p-0 border-b border-slate-200 dark:border-[#242936]">
+      <div class="flex flex-col max-w-3xl mx-auto">
+        <div class="flex items-center gap-2 px-4 pt-3 pb-1">
+          <span class="font-mono font-semibold text-[13px]">${name}</span>
+          <input class="${inp} w-24 text-[12px] py-1" value=${room} onInput=${e => setRoom(e.target.value)} title="room" />
+          <span class="flex-1"></span>
+          <button class="${btn} text-[12px] py-1" onClick=${onClose}>Close</button>
+        </div>
+        <div ref=${scroller} class="h-64 overflow-y-auto px-4 py-2 flex flex-col gap-1.5">
+          ${log.length === 0 && html`
+            <div class="text-[12.5px] text-slate-400 dark:text-slate-500 text-center my-auto">
+              Messages you send arrive inside ${name}'s Claude session. Replies appear here as they come.
+            </div>`}
+          ${log.map((x, i) => x.who === 'err'
+            ? html`<div key=${i} class="self-center text-[12px] text-red-500">${x.text}</div>`
+            : html`
+              <div key=${i} class="max-w-[75%] ${x.who === 'me' ? 'self-end' : 'self-start'}">
+                <div class="text-[13px] px-3 py-1.5 rounded-2xl whitespace-pre-wrap break-words ${
+                  x.who === 'me'
+                    ? 'bg-sky-600 text-white rounded-br-sm'
+                    : 'bg-white dark:bg-[#1c242f] border border-slate-200 dark:border-[#242936] rounded-bl-sm'
+                }">${x.text}</div>
+                <div class="text-[10px] text-slate-400 dark:text-slate-500 px-1 mt-0.5 ${x.who === 'me' ? 'text-right' : ''}">
+                  ${x.room && x.room !== 'main' ? `[${x.room}] ` : ''}${new Date(x.at).toLocaleTimeString()}
+                </div>
+              </div>`)}
+        </div>
+        <form class="flex gap-2 px-4 pb-3 pt-1" onSubmit=${send}>
+          <input class="${inp} flex-1" placeholder="Message ${name}…" autoFocus
+                 value=${text} onInput=${e => setText(e.target.value)} />
+          <button class=${btn} type="submit">Send</button>
+        </form>
+      </div>
     </td></tr>`;
 }
 
@@ -157,9 +192,9 @@ function Table({ data, dispatchOn, composeFor, setComposeFor }) {
               <td class="${td} ${dim}">${o.state === 'online' ? ago(o.lastOnline) : '—'}</td>
               <td class="${td} ${dim}">${o.transitions}</td>
               <td class=${td}>${o.channel === true && dispatchOn && html`
-                <button class=${btn} onClick=${() => setComposeFor(o.name)}>Send</button>`}</td>
+                <button class=${btn} onClick=${() => setComposeFor(o.name)}>Chat</button>`}</td>
             </tr>
-            ${composeFor === o.name && html`<${Compose} name=${o.name} onClose=${() => setComposeFor(null)} />`}
+            ${composeFor === o.name && html`<${Chat} name=${o.name} onClose=${() => setComposeFor(null)} />`}
           <//>`)}
       </tbody>
     </table>`;

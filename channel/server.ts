@@ -77,6 +77,24 @@ const QOS = Number(process.env.OC_QOS ?? 0) as 0 | 1 | 2;
 const KEEPALIVE = Number(process.env.OC_KEEPALIVE ?? 5);
 
 /**
+ * How often to re-announce presence, in seconds.
+ *
+ * MQTT keepalive is NOT this. Keepalive keeps the broker's session alive, so
+ * no will fires — but the registry's `last_seen` only advances when a message
+ * actually arrives on a watched topic. A session that connects, says `online`
+ * once and then works quietly for an hour is indistinguishable, to a
+ * subscriber, from one that wedged five minutes in. That is exactly what the
+ * registry's `stale` state means, and a silent member earns it honestly.
+ *
+ * So: re-publish the retained presence periodically. The registry only records
+ * an EVENT on a state CHANGE, so a repeated `online` refreshes last_seen
+ * without writing history. Default 60s against a default 15-minute stale
+ * threshold — a 15x margin, so several missed beats still are not a false
+ * alarm.
+ */
+const HEARTBEAT = Number(process.env.OC_HEARTBEAT ?? 60);
+
+/**
  * The oracle's name, which is also its topic namespace. It defaults to the
  * working directory's basename, because one repo is one oracle and the
  * directory already carries that name — including under `maw --wt`, where a
@@ -107,9 +125,13 @@ if (!/^[A-Za-z0-9_-]{1,64}$/.test(NAME)) {
 }
 if (!process.env.OC_NAME) log(`no OC_NAME set — using "${NAME}" from the working directory`);
 
-const IN_TOPIC = `${NAME}/+/in`;
-const STATUS_TOPIC = `${NAME}/status`;
-const outTopic = (room: string) => `${NAME}/${room}/out`;
+// One tree, one name: every topic this plugin touches lives under the
+// registry's prefix. No top-level namespace pollution, and a subscriber can
+// scope to `oracle/#` instead of guessing which bare names are oracles.
+const PREFIX = (process.env.OC_PREFIX ?? "oracle").replace(/\/+$/, "");
+const IN_TOPIC = `${PREFIX}/${NAME}/+/in`;
+const STATUS_TOPIC = `${PREFIX}/${NAME}/status`;
+const outTopic = (room: string) => `${PREFIX}/${NAME}/${room}/out`;
 // Presence is reliability-critical and must not inherit a QoS 0 setting meant
 // for chat volume: a dropped will is a member the registry believes is alive.
 const STATUS_QOS = 1;
@@ -127,7 +149,6 @@ const STATUS_QOS = 1;
  * script while its channel runs elsewhere would make that inference wrong.
  */
 const REGISTER = (process.env.OC_REGISTER ?? "true").toLowerCase() !== "false";
-const PREFIX = (process.env.OC_PREFIX ?? "oracle").replace(/\/+$/, "");
 const LWT_TOPIC = `${PREFIX}/${NAME}/lwt`;
 const META_TOPIC = `${PREFIX}/${NAME}/meta`;
 const HOST = (process.env.OC_HOST ?? hostname()).split(".")[0];
@@ -165,26 +186,28 @@ function member(name: string): Member {
   return m;
 }
 
-/** Retained state for the whole fleet, on the citizen connection. */
-const FLEET_TOPICS = [`${PREFIX}/+/lwt`, `${PREFIX}/+/meta`, `+/status`];
+/** Retained state for the whole fleet, on the citizen connection — all under one prefix. */
+const FLEET_TOPICS = [`${PREFIX}/+/lwt`, `${PREFIX}/+/meta`, `${PREFIX}/+/status`];
 
 function ingestFleet(topic: string, raw: string) {
   const parts = topic.split("/");
+  if (parts.length !== 3 || parts[0] !== PREFIX) return;
+  const [, name, leaf] = parts;
 
   // <prefix>/<name>/lwt — liveness, the registry's own contract.
-  if (parts.length === 3 && parts[0] === PREFIX && parts[2] === "lwt") {
-    const m = member(parts[1]);
+  if (leaf === "lwt") {
+    const m = member(name);
     // An empty retained payload is a deliberate goodbye; it clears the row
     // rather than marking it offline, matching how this plugin exits.
-    if (raw === "") { fleet.delete(parts[1]); return; }
+    if (raw === "") { fleet.delete(name); return; }
     if (raw === "online" || raw === "offline") m.state = raw;
     return;
   }
 
   // <prefix>/<name>/meta — identity.
-  if (parts.length === 3 && parts[0] === PREFIX && parts[2] === "meta") {
+  if (leaf === "meta") {
     if (raw === "") return;
-    const m = member(parts[1]);
+    const m = member(name);
     try {
       const j = JSON.parse(raw);
       if (typeof j.host === "string") m.host = j.host;
@@ -193,9 +216,9 @@ function ingestFleet(topic: string, raw: string) {
     return;
   }
 
-  // <name>/status — channel presence, outside the registry prefix.
-  if (parts.length === 2 && parts[1] === "status" && parts[0] !== PREFIX) {
-    const m = member(parts[0]);
+  // <prefix>/<name>/status — channel presence, same tree.
+  if (leaf === "status") {
+    const m = member(name);
     if (raw === "") { m.channel = null; return; }
     try {
       const j = JSON.parse(raw);
@@ -365,11 +388,11 @@ function start() {
   });
 
   client.on("message", (topic, payload) => {
-    // Exactly three segments ending in "in". Depth matters: a deeper topic is
+    // Exactly <prefix>/<name>/<room>/in. Depth matters: a deeper topic is
     // not this contract, and a wildcard match is not a reason to deliver.
     const parts = topic.split("/");
-    if (parts.length !== 3 || parts[0] !== NAME || parts[2] !== "in") return;
-    const room = parts[1];
+    if (parts.length !== 4 || parts[0] !== PREFIX || parts[1] !== NAME || parts[3] !== "in") return;
+    const room = parts[2];
 
     const raw = payload.toString().trim();
     if (!raw) return;
@@ -469,6 +492,22 @@ function register() {
   citizen.on("message", (topic, payload) => ingestFleet(topic, payload.toString().trim()));
 
   citizen.on("error", (err) => log(`registration mqtt error: ${err.message}`));
+
+  // The heartbeat: refresh both retained presences so the registry's
+  // last_seen keeps moving. Same payloads as at connect — the registry logs
+  // events only on CHANGE, so this refreshes liveness without writing history.
+  setInterval(() => {
+    if (citizen?.connected) {
+      citizen.publish(LWT_TOPIC, "online", { qos: 1, retain: true });
+    }
+    if (client?.connected) {
+      client.publish(
+        STATUS_TOPIC,
+        JSON.stringify({ online: true, client: CLIENT, version: VERSION, since: SINCE, ts: new Date().toISOString() }),
+        { qos: STATUS_QOS, retain: true },
+      );
+    }
+  }, HEARTBEAT * 1000).unref();
 }
 
 // ── lifecycle ───────────────────────────────────────────────────────────────
