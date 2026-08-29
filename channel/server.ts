@@ -132,6 +132,79 @@ const LWT_TOPIC = `${PREFIX}/${NAME}/lwt`;
 const META_TOPIC = `${PREFIX}/${NAME}/meta`;
 const HOST = (process.env.OC_HOST ?? hostname()).split(".")[0];
 
+// ── the fleet, as this session sees it ──────────────────────────────────────
+
+/**
+ * Every member's retained state, built from the same topics the registry
+ * board reads. Retained means one subscribe rebuilds the whole fleet, so this
+ * table is populated within a second of connecting rather than accumulating
+ * as members happen to speak.
+ *
+ * This is a READ of the broker, not a second source of truth: the registry
+ * add-on remains the authority. It exists so a session can answer "who else is
+ * up right now" without a round trip through the registry's HTTP API, which
+ * needs a key and may not be reachable from where the session runs.
+ */
+type Member = {
+  name: string;
+  state: "online" | "offline" | "unknown";
+  host: string | null;
+  since: string | null;
+  channel: boolean | null;
+  lastSeen: string;
+};
+const fleet = new Map<string, Member>();
+
+function member(name: string): Member {
+  let m = fleet.get(name);
+  if (!m) {
+    m = { name, state: "unknown", host: null, since: null, channel: null, lastSeen: new Date().toISOString() };
+    fleet.set(name, m);
+  }
+  m.lastSeen = new Date().toISOString();
+  return m;
+}
+
+/** Retained state for the whole fleet, on the citizen connection. */
+const FLEET_TOPICS = [`${PREFIX}/+/lwt`, `${PREFIX}/+/meta`, `+/status`];
+
+function ingestFleet(topic: string, raw: string) {
+  const parts = topic.split("/");
+
+  // <prefix>/<name>/lwt — liveness, the registry's own contract.
+  if (parts.length === 3 && parts[0] === PREFIX && parts[2] === "lwt") {
+    const m = member(parts[1]);
+    // An empty retained payload is a deliberate goodbye; it clears the row
+    // rather than marking it offline, matching how this plugin exits.
+    if (raw === "") { fleet.delete(parts[1]); return; }
+    if (raw === "online" || raw === "offline") m.state = raw;
+    return;
+  }
+
+  // <prefix>/<name>/meta — identity.
+  if (parts.length === 3 && parts[0] === PREFIX && parts[2] === "meta") {
+    if (raw === "") return;
+    const m = member(parts[1]);
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j.host === "string") m.host = j.host;
+      if (typeof j.since === "string") m.since = j.since;
+    } catch { /* opaque meta is still evidence the member exists */ }
+    return;
+  }
+
+  // <name>/status — channel presence, outside the registry prefix.
+  if (parts.length === 2 && parts[1] === "status" && parts[0] !== PREFIX) {
+    const m = member(parts[0]);
+    if (raw === "") { m.channel = null; return; }
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j.online === "boolean") m.channel = j.online;
+      if (!m.since && typeof j.since === "string") m.since = j.since;
+    } catch { /* not the channel contract */ }
+  }
+}
+
 // ── mcp ─────────────────────────────────────────────────────────────────────
 
 const mcp = new Server(
@@ -165,14 +238,66 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["chat_id", "text"],
       },
     },
+    {
+      name: "list_oracles",
+      description:
+        "List fleet members and their liveness, read from the broker's retained state. " +
+        "Filter by state (online, offline, unknown, all) and optionally require a live channel.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          state: {
+            type: "string",
+            enum: ["online", "offline", "unknown", "all"],
+            description: "Which members to return. Defaults to all.",
+          },
+          channel_only: {
+            type: "boolean",
+            description: "Only members whose channel is currently up — the ones that can receive a message.",
+          },
+        },
+      },
+    },
   ],
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+  const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+
+  if (req.params.name === "list_oracles") {
+    const want = String(args.state ?? "all");
+    const channelOnly = args.channel_only === true;
+    const rows = [...fleet.values()]
+      .filter((m) => (want === "all" ? true : m.state === want))
+      .filter((m) => (channelOnly ? m.channel === true : true))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              broker: BROKER,
+              prefix: PREFIX,
+              counts: {
+                online: [...fleet.values()].filter((m) => m.state === "online").length,
+                offline: [...fleet.values()].filter((m) => m.state === "offline").length,
+                unknown: [...fleet.values()].filter((m) => m.state === "unknown").length,
+                total: fleet.size,
+              },
+              oracles: rows,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  }
+
   if (req.params.name !== "reply") {
     return { isError: true, content: [{ type: "text", text: `unknown tool: ${req.params.name}` }] };
   }
-  const args = (req.params.arguments ?? {}) as Record<string, unknown>;
   const room = String(args.chat_id ?? "");
   const text = String(args.text ?? "");
   // The room becomes a topic segment; anything else would let a reply address
@@ -333,7 +458,15 @@ function register() {
     );
     citizen!.publish(LWT_TOPIC, "online", { qos: 1, retain: true });
     log(`registered as ${PREFIX}/${NAME} on host ${HOST}`);
+
+    // Read the rest of the fleet on the same connection. Retained state means
+    // this fills in immediately rather than waiting for members to speak.
+    citizen!.subscribe(FLEET_TOPICS, { qos: 1 }, (err) => {
+      if (err) log(`fleet subscribe failed: ${err.message}`);
+    });
   });
+
+  citizen.on("message", (topic, payload) => ingestFleet(topic, payload.toString().trim()));
 
   citizen.on("error", (err) => log(`registration mqtt error: ${err.message}`));
 }

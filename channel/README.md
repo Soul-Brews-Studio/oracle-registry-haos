@@ -112,3 +112,25 @@ reported it. The registry records which, as the event source (`clear` vs
 
 `OC_KEEPALIVE` defaults to 5 seconds, so a killed session is visibly offline in
 about seven. That is the dial that decides how fast the fleet notices a death.
+
+## Seeing the rest of the fleet
+
+The `list_oracles` tool answers "who else is up right now" from the broker's
+retained state, on the connection the plugin already holds:
+
+```
+list_oracles                                  → everyone
+list_oracles {"state": "online"}              → live members
+list_oracles {"state": "offline"}             → members the broker reported dead
+list_oracles {"channel_only": true}           → members that can receive a message
+```
+
+This is a read, not a second source of truth — the registry add-on stays the
+authority. It exists so a session can check the fleet without a round trip
+through the registry's HTTP API, which needs a key and may not be reachable
+from wherever the session happens to run.
+
+Because the state is retained, the table fills within a second of connecting
+rather than accumulating as members happen to speak. A member that left
+deliberately (cleared retain) drops out of the list; one that died stays,
+marked `offline`.
