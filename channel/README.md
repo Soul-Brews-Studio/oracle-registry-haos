@@ -80,9 +80,10 @@ TEST_BROKER=mqtt://127.0.0.1:1883 bun run test
 
 Covers: the `claude/channel` capability handshake, retained online presence,
 JSON and bare-string delivery with meta, strict topic depth (a deeper topic is
-not this contract), the `reply` round-trip, refusal of wildcard `chat_id`, and
-the shutdown goodbye — a clean MQTT disconnect drops the will, so the server
-publishes its own retained `offline` before ending.
+not this contract), the `reply` round-trip, refusal of wildcard `chat_id`, fleet
+registration on `lwt` and `meta`, and the shutdown goodbye — a clean MQTT
+disconnect drops the will, so the server clears its own retains before ending
+and leaves no `offline` behind.
 
 Apache-2.0. Clean-room implementation against the registry's published
 contract; the topic shape follows the same channel lineage as the official

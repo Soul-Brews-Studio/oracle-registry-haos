@@ -69,14 +69,27 @@ quiet one. The session is alive, so no will fires — but nothing is arriving
 either. That is neither confirmed up nor confirmed down, and flattening it into
 `online` would be a lie of convenience.
 
-### A limitation worth knowing
+### Telling a departure from a death
 
 **A will published by the broker is indistinguishable from a member publishing
 `offline` itself.** Both arrive on the same topic with the same payload; MQTT
-carries no "this was a will" flag to a subscriber. So the registry records
-*that* something went offline, reliably — but not *whether it meant to*. If you
-need that distinction, have members publish a distinct payload on clean
-shutdown and set the will to a different one.
+carries no "this was a will" flag to a subscriber. So on payload alone the
+registry records *that* something went offline — reliably — but not *whether it
+meant to*.
+
+The way out is for a departing member to **clear its retain** (an empty
+retained payload) instead of writing `offline`. Then the two cases differ in
+shape rather than in content:
+
+| how it went | what the broker holds | recorded source |
+|---|---|---|
+| left on purpose | nothing — the retain is gone | `clear` |
+| killed, crashed, unplugged | `offline`, published by the broker | `lwt` |
+
+The `events` log keeps that source, which is the difference between a tidy
+shutdown and a 3am incident. Clearing also removes the topic outright, so a
+decommissioned member stops reappearing on every restart.
+[`oracle-channel`](../channel/) does this; any member can, with `-r -n`.
 
 ## Channels: the naming convention
 
