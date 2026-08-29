@@ -484,7 +484,7 @@ Bun.serve({
       return json({
         status: "ok",
         service: "oracle-registry",
-        version: process.env.OR_VERSION ?? "0.2.1",
+        version: process.env.OR_VERSION ?? "0.2.2",
         mqtt: mqttStatus,
         dispatch: { enabled: DISPATCH_ENABLED, connected: dispatchStatus.connected },
         prefix: PREFIX,

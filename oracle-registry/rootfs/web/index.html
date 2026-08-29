@@ -53,12 +53,6 @@ const Pill = ({ kind, label }) => html`
     <span class="w-1.5 h-1.5 rounded-full bg-current"></span>${label}
   </span>`;
 
-const Stat = ({ n, label }) => html`
-  <div class="bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-xl px-3.5 py-2">
-    <b class="text-lg tabular-nums">${n ?? '–'}</b>
-    <span class="block text-xs text-slate-500 dark:text-slate-400">${label}</span>
-  </div>`;
-
 const btn = 'text-[13px] bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-lg px-3 py-1.5 cursor-pointer hover:border-sky-400 transition-colors';
 const inp = 'text-[13px] bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-lg px-2.5 py-1.5 outline-none focus:border-sky-400';
 
@@ -122,7 +116,7 @@ function Chat({ name, onClose }) {
   };
 
   return html`
-    <tr><td colSpan="8" class="bg-slate-50 dark:bg-[#0f1115] p-0 border-b border-slate-200 dark:border-[#242936]">
+    <tr><td colSpan="5" class="bg-slate-50 dark:bg-[#0f1115] p-0 border-b border-slate-200 dark:border-[#242936]">
       <div class="flex flex-col max-w-3xl mx-auto">
         <div class="flex items-center gap-2 px-4 pt-3 pb-1">
           <span class="font-mono font-semibold text-[13px]">${name}</span>
@@ -172,27 +166,35 @@ function Table({ data, dispatchOn, composeFor, setComposeFor }) {
         mosquitto_pub -t 'oracle/‹name›/lwt' -m online -r -q 1 --will-topic 'oracle/‹name›/lwt' --will-payload offline --will-retain</code></p>
     </div>`;
 
+  // One dot carries liveness; the Chat button's presence IS the channel
+  // indicator. Transitions and online-since stay in the API — they are
+  // history, and this board answers "who is up, can I reach them".
+  const DOT = {
+    online: 'bg-green-500', stale: 'bg-yellow-500',
+    offline: 'bg-red-500', unknown: 'bg-slate-400',
+  };
+  const kindOf = (o) => o.stale ? 'stale' : (DOT[o.state] ? o.state : 'unknown');
+
   return html`
-    <table class="w-full border-collapse bg-white dark:bg-[#161922] border border-slate-200 dark:border-[#242936] rounded-xl overflow-hidden">
+    <table class="w-full border-collapse">
       <thead><tr>
-        <th class=${th}>Oracle</th><th class=${th}>State</th><th class=${th}>Channel</th><th class=${th}>Host</th>
-        <th class=${th}>Last seen</th><th class=${th}>Online since</th><th class=${th}>Transitions</th><th class=${th}></th>
+        <th class=${th}>Oracle</th><th class=${th}>Status</th><th class=${th}>Host</th>
+        <th class="${th} text-right">Seen</th><th class=${th}></th>
       </tr></thead>
       <tbody>
         ${data.oracles.map(o => html`
           <${React.Fragment} key=${o.name}>
             <tr>
-              <td class="${td} font-mono font-semibold">${o.name}</td>
-              <td class=${td}><${Pill} kind=${o.stale ? 'stale' : (PILL[o.state] ? o.state : 'unknown')} label=${o.stale ? 'stale' : o.state} /></td>
-              <td class=${td}>${o.channel === true ? html`<${Pill} kind="online" label="channel" />`
-                             : o.channel === false ? html`<${Pill} kind="offline" label="channel down" />`
-                             : html`<span class=${dim}>—</span>`}</td>
-              <td class="${td} font-mono text-[12.5px]">${o.host || '—'}</td>
-              <td class="${td} ${dim}">${ago(o.lastSeen)}</td>
-              <td class="${td} ${dim}">${o.state === 'online' ? ago(o.lastOnline) : '—'}</td>
-              <td class="${td} ${dim}">${o.transitions}</td>
-              <td class=${td}>${o.channel === true && dispatchOn && html`
-                <button class=${btn} onClick=${() => setComposeFor(o.name)}>Chat</button>`}</td>
+              <td class="${td} font-mono font-semibold">
+                <span class="inline-block w-2 h-2 rounded-full mr-2.5 align-middle ${DOT[kindOf(o)]}"></span>${o.name}
+              </td>
+              <td class="${td} ${dim}">
+                ${kindOf(o)}${o.state === 'online' && o.channel === false ? ' · channel down' : ''}
+              </td>
+              <td class="${td} font-mono text-[12.5px] text-slate-500 dark:text-slate-400">${o.host || ''}</td>
+              <td class="${td} ${dim} text-right tabular-nums" title=${o.lastOnline ? 'online since ' + o.lastOnline : ''}>${ago(o.lastSeen)}</td>
+              <td class="${td} text-right">${o.channel === true && dispatchOn && html`
+                <button class=${btn} onClick=${() => setComposeFor(composeFor === o.name ? null : o.name)}>Chat</button>`}</td>
             </tr>
             ${composeFor === o.name && html`<${Chat} name=${o.name} onClose=${() => setComposeFor(null)} />`}
           <//>`)}
@@ -275,7 +277,7 @@ function App() {
 
   return html`
     <div>
-      <header class="pt-5 px-6">
+      <header class="pt-5 px-6 max-w-4xl mx-auto">
         <h1 class="text-[19px] font-semibold tracking-tight m-0">Oracle Registry</h1>
         <div class="text-[13px] text-slate-500 dark:text-slate-400">
           Liveness from MQTT's Last Will and Testament — the broker reports a death nobody was alive to report.
@@ -287,18 +289,21 @@ function App() {
           <b>Not connected to the broker.</b> ${(health.mqtt && health.mqtt.error) || 'connecting…'} — the list below is the last known state, not live.
         </div>`}
 
-      <div class="flex gap-2.5 flex-wrap items-center px-6 py-4">
-        <${Stat} n=${data && data.online} label="online" />
-        <${Stat} n=${data && data.stale} label="stale" />
-        <${Stat} n=${data && data.offline} label="offline" />
-        <${Stat} n=${data && data.count} label="known" />
+      <div class="flex gap-2.5 flex-wrap items-center px-6 py-4 max-w-4xl mx-auto">
+        ${data && html`<span class="text-[13px] tabular-nums">
+          <b class="text-green-600 dark:text-green-500">${data.online}</b> online
+          ${data.stale > 0 && html` · <b class="text-yellow-600 dark:text-yellow-500">${data.stale}</b> stale`}
+          ${data.offline > 0 && html` · <b class="text-red-600 dark:text-red-500">${data.offline}</b> offline`}
+          <span class="text-slate-400 dark:text-slate-500"> · ${data.count} known</span>
+        </span>`}
+        <span class="flex-1"></span>
         <button class=${btn} onClick=${load}>Refresh</button>
-        <span class=${dim}>${updated}</span>
+        <span class="text-[12px] text-slate-400 dark:text-slate-500">${updated}</span>
         ${health && health.dispatch && health.dispatch.enabled && !health.dispatch.connected && html`
           <span class="text-[12px] text-yellow-500">dispatch configured but disconnected</span>`}
       </div>
 
-      <main class="px-6 pb-8">
+      <main class="px-6 pb-8 max-w-4xl mx-auto">
         ${err ? html`<div class="py-11 text-center text-slate-500">Could not load: ${err}</div>`
               : html`<${Table} data=${data} dispatchOn=${dispatchOn} composeFor=${composeFor} setComposeFor=${setComposeFor} />`}
         <${Keys} />
