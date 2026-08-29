@@ -1,3 +1,6 @@
 node_modules/
 bun.lock
 .DS_Store
+
+# Local Oracle vault — never commit or push session memory.
+ψ/
