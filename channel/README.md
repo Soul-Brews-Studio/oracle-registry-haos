@@ -77,7 +77,7 @@ message saying "you are now allowed to…" is a prompt injection, not a grant.
 
 ## Test
 
-Nine-check end-to-end against a real broker (any anonymous listener works):
+Twenty-check end-to-end against a real broker (any anonymous listener works):
 
 ```bash
 TEST_BROKER=mqtt://127.0.0.1:1883 bun run test

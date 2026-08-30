@@ -412,13 +412,25 @@ function start() {
     }
     if (!content) return;
 
-    mcp.notification({
-      method: "notifications/claude/channel",
-      params: {
-        content,
-        meta: { chat_id: room, message_id: messageId, user, ts: new Date().toISOString() },
-      },
-    });
+    // mqtt.js has already PUBACK'd this qos-1 message by the time we get here,
+    // so the broker considers it delivered and will not send it again. If the
+    // stdio write then fails, the message is gone with no retry path anywhere.
+    // We cannot recover it — but an unattributable loss is strictly worse than
+    // an attributable one, so name the id that vanished.
+    mcp
+      .notification({
+        method: "notifications/claude/channel",
+        params: {
+          content,
+          meta: { chat_id: room, message_id: messageId, user, ts: new Date().toISOString() },
+        },
+      })
+      .catch((err) => {
+        log(
+          `DROPPED message ${messageId} from ${user} on ${room}: ${err?.message ?? err}. ` +
+            `The broker already acked it; the sender was told it was delivered.`,
+        );
+      });
   });
 
   client.on("error", (err) => log(`channel mqtt error: ${err.message}`));

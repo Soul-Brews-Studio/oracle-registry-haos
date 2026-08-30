@@ -135,6 +135,21 @@ Anything else needs one: `Authorization: Bearer <key>`. Mint keys on the page �
 **a key cannot mint another key**, so a single leak does not become permanent
 access that survives revoking it.
 
+**What proves a request came from the sidebar.** Home Assistant sets
+`X-Ingress-Path` on everything it proxies, but a header is a claim, not
+evidence — this container listens on the hassio bridge, where every other
+add-on can reach it (our own `core-mosquitto` default is one add-on addressing
+another that way). So the header is accepted only when the request also arrives
+from Supervisor's range, `172.30.32.0/23`. Set `OR_TRUST_INGRESS_HEADER=1` to
+run outside Home Assistant; refusals are logged with the peer address either
+way.
+
+**Keys are stored as `sha256(key)`, never as the value you were shown.** The
+mint response says the key is shown only once, and since 0.3.0 that is
+literally true: a copy of `/data/registry.db` — which rides inside Home
+Assistant backups — yields no usable credential. Keys minted before 0.3.0 are
+hashed in place on first start and keep working.
+
 | route | |
 |---|---|
 | `GET /api/health` | open, unauthenticated — broker connection state, dispatch state, counts |
@@ -142,9 +157,9 @@ access that survives revoking it.
 | `GET /api/oracles/:name` | one member plus its last 100 transitions |
 | `POST /api/oracles/:name/send` | dispatch `{room?, text, user?}` to `<prefix>/<name>/<room>/in`. Needs a dispatch-capable caller: the sidebar, or a key minted with dispatch permission. `503` dispatch off/disconnected · `403` key lacks permission · `400` bad name/room/text · `429` over 30/min. Every send is logged |
 | `GET /api/oracles/:name/replies?since=` | recent channel replies (in-memory, last 200 fleet-wide — a live view, not a transcript) |
-| `DELETE /api/oracles/:name` | forget locally *(the retained topics live in the broker — clear `lwt` and `status` there too, or it reappears)* |
+| `DELETE /api/oracles/:name` | forget locally, **sidebar only** *(the retained topics live in the broker — clear `lwt` and `status` there too, or it reappears)* |
 | `GET /api/events?limit=` | the transition log |
-| `GET`/`POST /api/keys`, `DELETE /api/keys/:id` | key management, sidebar only. `can_dispatch` is set at mint time and never changeable afterwards — a leaked key cannot upgrade itself |
+| `GET`/`POST /api/keys`, `DELETE /api/keys/:id` | key management, sidebar only — listing included, since it enumerates which keys can dispatch. `can_dispatch` is set at mint time and never changeable afterwards — a leaked key cannot upgrade itself |
 
 ## Install
 

@@ -21,7 +21,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import mqtt from "mqtt";
 
 const DB_PATH = process.env.OR_DB ?? "/data/registry.db";
@@ -42,6 +42,9 @@ const DISPATCH_PASS = process.env.OR_DISPATCH_PASS ?? "";
 const DISPATCH_ENABLED = Boolean(BROKER && DISPATCH_USER && DISPATCH_PASS);
 
 const nowIso = () => new Date().toISOString();
+
+/** Keys are stored as a digest, never as the value handed to the user. */
+const hashKey = (raw: string) => createHash("sha256").update(raw).digest("hex");
 
 // ── database ────────────────────────────────────────────────────────────────
 
@@ -102,6 +105,23 @@ const cols = (t: string) =>
 if (!cols("api_keys").has("can_dispatch")) {
   db.exec("ALTER TABLE api_keys ADD COLUMN can_dispatch INTEGER NOT NULL DEFAULT 0");
 }
+// API keys were stored verbatim through 0.2.2, while the mint response promised
+// "this is the only time it is shown". /data/registry.db rides inside Home
+// Assistant backups and is readable from any add-on with filesystem access, so
+// that promise was not true. Hash what is already there — a minted key still
+// works, and its plaintext stops existing.
+{
+  const plaintext = db
+    .query<{ id: string; key: string }, []>(`SELECT id, key FROM api_keys`)
+    .all()
+    .filter((r) => r.key.startsWith("ork_"));
+  if (plaintext.length) {
+    const upd = db.query(`UPDATE api_keys SET key = $key WHERE id = $id`);
+    for (const row of plaintext) upd.run({ $id: row.id, $key: hashKey(row.key) });
+    console.log(`[registry] migrated ${plaintext.length} api key(s) to sha256 at rest`);
+  }
+}
+
 if (!cols("oracles").has("channel_online")) {
   // null = never saw a status topic; 0/1 = the channel's own retained LWT.
   db.exec("ALTER TABLE oracles ADD COLUMN channel_online INTEGER");
@@ -385,11 +405,47 @@ const TOPIC_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
  * Ingress requests already passed Home Assistant's login, so the sidebar page
- * needs no key of its own. Home Assistant sets X-Ingress-Path on everything it
- * proxies, and that header cannot be forged from outside because nothing but
- * HA can reach this port — there is no `ports:` mapping in config.yaml.
+ * needs no key of its own.
+ *
+ * The header alone is NOT evidence of that. `X-Ingress-Path` is set by Home
+ * Assistant on everything it proxies, but it is just a header: anything that
+ * can open a socket to this port can send one. There is no `ports:` mapping,
+ * so nothing *outside* the box can — but this container listens on
+ * 0.0.0.0:8099 on the hassio bridge, and every co-resident add-on sits on that
+ * same bridge. Our own default proves it: `mqtt://core-mosquitto:1883` is one
+ * add-on addressing another by container hostname, and the registry answers
+ * the same way. A compromised Terminal, File editor or Git pull add-on could
+ * therefore mint itself a dispatch key and publish into every channel-capable
+ * session on the fleet, without ever touching HA's login.
+ *
+ * So the claim has to be backed by something the caller does not control: the
+ * peer address. Supervisor proxies ingress from 172.30.32.0/23. Both must hold.
  */
-const viaIngress = (req: Request) => req.headers.has("x-ingress-path");
+const SUPERVISOR_CIDR = "172.30.32.0/23"; // 172.30.32.0 – 172.30.33.255
+function fromSupervisor(ip: string | null | undefined): boolean {
+  if (!ip) return false;
+  const m = ip.replace(/^::ffff:/, "").match(/^(\d+)\.(\d+)\.(\d+)\.\d+$/);
+  if (!m) return false;
+  const [, a, b, c] = m.map(Number) as unknown as [string, number, number, number];
+  return a === 172 && b === 30 && (c === 32 || c === 33);
+}
+
+/**
+ * Escape hatch for running outside Home Assistant (local development, the
+ * e2e suite). Opt-in and loud — never a silent default.
+ */
+const TRUST_INGRESS_HEADER = process.env.OR_TRUST_INGRESS_HEADER === "1";
+
+function viaIngress(req: Request, peerIp: string | null): boolean {
+  if (!req.headers.has("x-ingress-path")) return false;
+  if (TRUST_INGRESS_HEADER) return true;
+  if (fromSupervisor(peerIp)) return true;
+  console.log(
+    `[registry] ingress header from ${peerIp ?? "unknown peer"} — not Supervisor (${SUPERVISOR_CIDR}), ` +
+      `refused. If this is a legitimate deployment, set OR_TRUST_INGRESS_HEADER=1 knowingly.`,
+  );
+  return false;
+}
 
 function keyFromRequest(req: Request): string | null {
   const auth = req.headers.get("authorization");
@@ -398,12 +454,15 @@ function keyFromRequest(req: Request): string | null {
   return x ? x.trim() : null;
 }
 
-/** Constant-time compare against every stored key, so a timing signal cannot leak one. */
+/**
+ * Compare digests, never the value. Constant-time across every stored key, so
+ * neither a timing signal nor a copy of the database leaks a usable credential.
+ */
 function validKey(candidate: string): { id: string; canDispatch: boolean } | null {
-  const buf = Buffer.from(candidate);
+  const digest = Buffer.from(hashKey(candidate), "hex");
   for (const row of q.allKeyValues.all()) {
-    const stored = Buffer.from(row.key);
-    if (stored.length === buf.length && timingSafeEqual(stored, buf)) {
+    const stored = Buffer.from(row.key, "hex");
+    if (stored.length === digest.length && timingSafeEqual(stored, digest)) {
       return { id: row.id, canDispatch: row.can_dispatch === 1 };
     }
   }
@@ -415,8 +474,8 @@ type Auth =
   | { ok: true; via: "api-key"; keyId: string; canDispatch: boolean }
   | { ok: false };
 
-function authorize(req: Request): Auth {
-  if (viaIngress(req)) return { ok: true, via: "ingress", keyId: null, canDispatch: true };
+function authorize(req: Request, peerIp: string | null): Auth {
+  if (viaIngress(req, peerIp)) return { ok: true, via: "ingress", keyId: null, canDispatch: true };
   const candidate = keyFromRequest(req);
   if (!candidate) return { ok: false };
   const found = validKey(candidate);
@@ -472,7 +531,8 @@ const web = `${import.meta.dir}/web`;
 Bun.serve({
   port: PORT,
   hostname: "0.0.0.0",
-  async fetch(req) {
+  async fetch(req, server) {
+    const peerIp = server.requestIP(req)?.address ?? null;
     const url = new URL(req.url);
     // Ingress serves this under /api/hassio_ingress/<token>/…; strip that so
     // one set of route names works through the sidebar and directly alike.
@@ -496,7 +556,7 @@ Bun.serve({
     }
 
     if (path.startsWith("/api/")) {
-      const auth = authorize(req);
+      const auth = authorize(req, peerIp);
       if (!auth.ok) return unauthorized();
 
       if (path === "/api/oracles" && req.method === "GET") {
@@ -533,7 +593,13 @@ Bun.serve({
           return json({ error: "bad_request", message: "text must be non-empty and at most 8192 chars" }, 400);
         }
         if (!q.one.get(name)) return json({ error: "not_found" }, 404);
-        const who = auth.via === "api-key" ? auth.keyId : "ingress";
+        // Home Assistant identifies the logged-in user on ingress requests;
+        // bucketing every sidebar caller as the literal string "ingress" gave
+        // the whole household one shared 30/min budget.
+        const who =
+          auth.via === "api-key"
+            ? auth.keyId!
+            : `ingress:${req.headers.get("x-remote-user-id") ?? req.headers.get("x-remote-user-name") ?? "unknown"}`;
         if (rateLimited(who)) return json({ error: "rate_limited", message: "At most 30 dispatches per minute." }, 429);
 
         const id = randomBytes(8).toString("hex");
@@ -561,6 +627,12 @@ Bun.serve({
         const row = q.one.get(name) as any;
         if (!row) return json({ error: "not_found" }, 404);
         if (req.method === "DELETE") {
+          // Destructive, so sidebar only — the same bar as key management. A
+          // dispatch key is a write credential for one narrow contract, not a
+          // licence to edit the inventory.
+          if (auth.via !== "ingress") {
+            return json({ error: "forbidden", message: "Forgetting a member is available only from the Home Assistant sidebar." }, 403);
+          }
           // Forgetting is local bookkeeping only. The retained message lives in
           // the BROKER, so a forgotten oracle reappears the moment the registry
           // resubscribes — unless the retain is cleared at the source too.
@@ -582,11 +654,15 @@ Bun.serve({
       // to mint another one, or a single leak becomes permanent access that
       // survives revoking the key that caused it.
       if (path === "/api/keys") {
+        // Sidebar only, for reading as well as minting. Listing exposes no key
+        // VALUES (see q.keys), but it does enumerate which keys exist and which
+        // of them can dispatch — a target list, handed to a caller holding one
+        // key already. The guard belongs on the route, not inside one method.
+        if (auth.via !== "ingress") {
+          return json({ error: "forbidden", message: "Key management is available only from the Home Assistant sidebar." }, 403);
+        }
         if (req.method === "GET") return json({ keys: q.keys.all() });
         if (req.method === "POST") {
-          if (auth.via !== "ingress") {
-            return json({ error: "forbidden", message: "Keys can only be minted from the Home Assistant sidebar." }, 403);
-          }
           const body = (await req.json().catch(() => ({}))) as any;
           const label = String(body.label ?? "").trim() || "unnamed";
           const key = `ork_${randomBytes(24).toString("hex")}`;
@@ -594,7 +670,9 @@ Bun.serve({
           // Dispatch permission is decided at mint time only — and minting is
           // already ingress-only, so a leaked key can never upgrade itself.
           const can = body.can_dispatch === true ? 1 : 0;
-          q.mintKey.run({ $id: id, $label: label, $key: key, $at: nowIso(), $can: can });
+          // Only the digest is persisted; `key` below is the sole time the
+          // caller will ever see the value, and now that is literally true.
+          q.mintKey.run({ $id: id, $label: label, $key: hashKey(key), $at: nowIso(), $can: can });
           // The only time the key is ever returned. It is not recoverable later.
           return json({ id, label, key, can_dispatch: can === 1, note: "Copy it now — this is the only time it is shown." }, 201);
         }

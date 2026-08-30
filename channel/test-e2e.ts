@@ -1,5 +1,5 @@
 /**
- * End-to-end against a real broker. Nine checks, each one a behavior the
+ * End-to-end against a real broker. Twenty checks, each one a behavior the
  * server must keep — not a mock of the transport but the transport itself.
  *
  *   TEST_BROKER=mqtt://127.0.0.1:1883 bun run test
@@ -140,7 +140,65 @@ check("clean exit leaves no 'offline' behind", !seen.some((m) => m.payload === "
 bus.publish(`oracle/${NAME}/status`, "", { retain: true });
 bus.publish(`oracle/${NAME}/lwt`, "", { retain: true });
 bus.publish(`oracle/${NAME}/meta`, "", { retain: true });
-bus.end();
 child.kill();
+
+// 10. THE WILL ITSELF. Everything above tests the graceful path, where the
+//     process publishes its own goodbye. But the registry's whole premise is
+//     the ungraceful one: a member that cannot say anything, reported by the
+//     broker on its behalf. Nothing in this suite exercised that until now, so
+//     the one mechanism the design rests on was the one thing unverified.
+//
+//     SIGKILL, not SIGTERM — SIGTERM runs the shutdown handler and takes the
+//     clean-exit path we just tested. The distinction between the two IS the
+//     feature (`clear` vs `lwt` in the registry's event log).
+const KNAME = "oc-test-kill";
+for (const t of [`oracle/${KNAME}/status`, `oracle/${KNAME}/lwt`, `oracle/${KNAME}/meta`]) {
+  bus.publish(t, "", { retain: true });
+}
+const killSeen: { topic: string; payload: string }[] = [];
+bus.on("message", (t, p) => killSeen.push({ topic: t, payload: p.toString() }));
+await new Promise<void>((res) =>
+  bus.subscribe([`oracle/${KNAME}/lwt`, `oracle/${KNAME}/status`], () => res()),
+);
+
+const victim = spawn("bun", ["run", "--env-file=/dev/null", "server.ts"], {
+  cwd: import.meta.dir,
+  env: { ...process.env, OC_STATE_DIR: mkdtempSync(join(tmpdir(), "oc-e2e-kill-")), OC_NAME: KNAME, OC_BROKER: BROKER },
+  stdio: ["pipe", "pipe", "pipe"],
+});
+victim.stderr.on("data", (d) => process.env.E2E_VERBOSE && process.stderr.write(d));
+
+const alive = await until(
+  () => killSeen.find((m) => m.topic === `oracle/${KNAME}/lwt` && m.payload === "online"),
+  8000,
+);
+check("victim registers before the kill", !!alive);
+
+killSeen.length = 0;
+victim.kill("SIGKILL");
+
+// The broker publishes the will as soon as the socket dies; keepalive only
+// matters for a partition, where there is no FIN to notice.
+const willFired = await until(
+  () => killSeen.find((m) => m.topic === `oracle/${KNAME}/lwt` && m.payload === "offline"),
+  8000,
+);
+check("SIGKILL fires the retained will (offline)", !!willFired);
+check(
+  "a killed member does NOT clear its retains",
+  !killSeen.some((m) => m.topic === `oracle/${KNAME}/lwt` && m.payload === ""),
+  "an empty retain here would make a death indistinguishable from a departure",
+);
+const statusWill = await until(
+  () => killSeen.find((m) => m.topic === `oracle/${KNAME}/status`),
+  3000,
+);
+check("the channel connection's own will also fires", !!statusWill);
+
+for (const t of [`oracle/${KNAME}/status`, `oracle/${KNAME}/lwt`, `oracle/${KNAME}/meta`]) {
+  bus.publish(t, "", { retain: true });
+}
+await wait(300);
+bus.end();
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
