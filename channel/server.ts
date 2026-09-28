@@ -435,23 +435,63 @@ function start() {
 
   client.on("error", (err) => log(`channel mqtt error: ${err.message}`));
 
-  // Flap detector. When another live session claims the same name, the broker
-  // hands the clientId back and forth and each side sees rapid closes. Say
-  // what is actually happening instead of logging an anonymous disconnect.
+  guardFlap(client, "channel");
+}
+
+// ── flap guard ──────────────────────────────────────────────────────────────
+
+/**
+ * When two live sessions claim one NAME, the broker hands the clientId back and
+ * forth and both sides reconnect every second, forever. That loop is visible on
+ * purpose, but it is not free: every reconnect republishes retained presence,
+ * and EVERY member subscribes to the fleet topics, so one colliding pair costs
+ * the whole machine. Measured on m5, 2026-09-29: two colliding pairs made 300
+ * messages per 30 s instead of ~30, and 38 idle sessions together burned 98% of
+ * one core; stopping the duplicates dropped it to 14%.
+ *
+ * So: still say loudly what is happening, but stop hammering. After a flap,
+ * double the reconnect delay (30 s up to 5 min). A connection that stays up for
+ * a minute resets it. mqtt.js reads `options.reconnectPeriod` each time it
+ * schedules a reconnect, so changing it at runtime takes effect on the next one.
+ */
+const FLAP_WINDOW_MS = 30_000;
+const FLAP_CLOSES = 4;
+const BACKOFF_MIN_MS = 30_000;
+const BACKOFF_MAX_MS = 300_000;
+const STABLE_MS = 60_000;
+const BASE_RECONNECT_MS = 1000;
+
+function guardFlap(c: mqtt.MqttClient, label: string) {
   let closes: number[] = [];
-  client.on("close", () => {
+  let stableTimer: ReturnType<typeof setTimeout> | null = null;
+  c.on("connect", () => {
+    if (stableTimer) clearTimeout(stableTimer);
+    stableTimer = setTimeout(() => {
+      if (c.options.reconnectPeriod !== BASE_RECONNECT_MS) {
+        log(`${label}: connection stable for ${STABLE_MS / 1000}s — reconnect delay back to ${BASE_RECONNECT_MS} ms`);
+        c.options.reconnectPeriod = BASE_RECONNECT_MS;
+      }
+    }, STABLE_MS);
+    stableTimer.unref?.();
+  });
+  c.on("close", () => {
+    if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
     const now = Date.now();
-    closes = closes.filter((t) => now - t < 30_000);
+    closes = closes.filter((t) => now - t < FLAP_WINDOW_MS);
     closes.push(now);
-    if (closes.length >= 4) {
-      log(
-        `connection is flapping — another session is probably running as "${NAME}". ` +
-          `If two sessions share this directory, give one its own name: export OC_NAME=<other-name>`,
-      );
-      closes = [];
-    } else {
-      log("mqtt connection closed");
+    if (closes.length < FLAP_CLOSES) {
+      log(`${label}: mqtt connection closed`);
+      return;
     }
+    const cur = c.options.reconnectPeriod ?? BASE_RECONNECT_MS;
+    const next = Math.min(Math.max(cur * 2, BACKOFF_MIN_MS), BACKOFF_MAX_MS);
+    c.options.reconnectPeriod = next;
+    log(
+      `${label}: connection is flapping — another session is probably running as "${NAME}". ` +
+        `Reconnecting every ${next / 1000}s until it settles. ` +
+        `If two sessions share this directory, give one its own name: export OC_NAME=<other-name>`,
+    );
+    closes = [];
   });
 }
 
@@ -476,6 +516,7 @@ function register() {
     // loses power, or drops off the network, the BROKER says so on its behalf.
     will: { topic: LWT_TOPIC, payload: "offline", qos: 1, retain: true },
   });
+  guardFlap(citizen, "member");
 
   citizen.on("connect", () => {
     // Identity first, then liveness — so a board that sees "online" already has
